@@ -1,85 +1,104 @@
-const Client = require('ssh2-sftp-client');
-const moment = require('moment');
-const fs = require('fs');
-const path = require('path');
-const xlsx = require('xlsx');
-const winston = require('winston');
+// serverDownload.js
+const fs = require("fs");
+const path = require("path");
+const SftpClient = require("ssh2-sftp-client");
 
-// Logging
-const logger = winston.createLogger({
-  level: 'info',
-  format: winston.format.simple(),
-  transports: [new winston.transports.Console()]
-});
+const DOWNLOAD_DIR = path.join(__dirname, "downloads");
 
-// ---- SFTP servers ----
 const servers = [
   {
-    name:"AlvinACW",
-    host: 'cwtarchive.blob.core.windows.net',
-    username: 'cwtarchive.five9',
-    password: '4fWavmwAY3k49qRaIsFZ5LmbPzzP2qdK',
-    folder: 'AlvinACW',
+    name: "AlvinACW",
+    host: "cwtarchive.blob.core.windows.net",
+    username: "cwtarchive.five9",
+    password: "4fWavmwAY3k49qRaIsFZ5LmbPzzP2qdK",
+    folder: "AlvinACW",
     port: 22
   },
   {
-    name:"AlvinRRFUBRLUNCH",
-    host: 'cwtarchive.blob.core.windows.net',
-    username: 'cwtarchive.five9',
-    password: '4fWavmwAY3k49qRaIsFZ5LmbPzzP2qdK',
-    folder: 'AlvinRRFUBRLUNCH',
+    name: "AlvinRRFUBRLUNCH",
+    host: "cwtarchive.blob.core.windows.net",
+    username: "cwtarchive.five9",
+    password: "4fWavmwAY3k49qRaIsFZ5LmbPzzP2qdK",
+    folder: "AlvinRRFUBRLUNCH",
     port: 22
   }
 ];
 
-async function downloadFromServer(config) {
-  const sftp = new Client();
-  try {
-    await sftp.connect({
-      host: config.host,
-      username: config.username,
-      password: config.password,
-      port: config.port
-    });
+// 👉 Match Five9 format: YYYY_MM-DD
+function todayFive9Pattern() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
 
-    const files = await sftp.list(config.folder);
-    if (!files.length) return logger.error(`No files in ${config.folder}`);
+  return `${y}_${m}-${day}`; // 2025_12-15
+}
 
-    const latest = files.sort((a,b)=> new Date(b.modifyTime)-new Date(a.modifyTime))[0];
-
-    const today = moment().format("YYYY-MM-DD");
-    const dir = path.join("downloads", today);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive:true });
-
-    const timestamp = moment().format("HH-mm");
-    const localCSV = path.join(dir, `${config.name}_${today}_${timestamp}.csv`);
-    const localXLSX = path.join(dir, `${config.name}_${today}_${timestamp}.xlsx`);
-
-    await sftp.get(`${config.folder}/${latest.name}`, localCSV);
-    logger.info(`Downloaded CSV ✔ ${localCSV}`);
-
-    // Convert CSV to Excel auto
-    const data = fs.readFileSync(localCSV, "utf8").split("\n").map(r => r.split(","));
-    const wb = xlsx.utils.book_new();
-    const ws = xlsx.utils.aoa_to_sheet(data);
-    xlsx.utils.book_append_sheet(wb, ws, "Sheet1");
-    xlsx.writeFile(wb, localXLSX);
-
-    logger.info(`Converted to Excel ✔ ${localXLSX}`);
+async function downloadFromServers() {
+  if (!fs.existsSync(DOWNLOAD_DIR)) {
+    fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
   }
-  catch(err){
-    logger.error("Error:",err.message);
-  }
-  finally{
-    sftp.end();
+
+  const todayPattern = todayFive9Pattern();
+  console.log("📅 Matching Five9 Date Pattern:", todayPattern);
+
+  for (const server of servers) {
+    const sftp = new SftpClient();
+    console.log(`\n🔗 Connecting → ${server.name}`);
+
+    try {
+      await sftp.connect({
+        host: server.host,
+        port: server.port,
+        username: server.username,
+        password: server.password
+      });
+
+      const remoteDir = `/${server.folder}`;
+      const files = await sftp.list(remoteDir);
+
+      const csvFiles = files
+        .filter(f => f.name.endsWith(".csv"))
+        .sort((a, b) => b.modifyTime - a.modifyTime); // latest first
+
+      console.log(
+        `📂 Latest files in ${server.folder}:`,
+        csvFiles.slice(0, 3).map(f => f.name)
+      );
+
+      // 1️⃣ Try today's file
+      let selected = csvFiles.find(f =>
+        f.name.includes(todayPattern)
+      );
+
+      // 2️⃣ Fallback → latest available file
+      if (!selected) {
+        console.log(
+          `⚠ Today file not found. Using latest available file`
+        );
+        selected = csvFiles[0];
+      }
+
+      if (!selected) {
+        console.log(`❌ No CSV files found in ${server.folder}`);
+        continue;
+      }
+
+      const remotePath = `${remoteDir}/${selected.name}`;
+      const localPath = path.join(
+        DOWNLOAD_DIR,
+        `${server.name}_${selected.name}`
+      );
+
+      await sftp.fastGet(remotePath, localPath);
+      console.log(`✅ Downloaded → ${localPath}`);
+
+    } catch (err) {
+      console.error(`❌ ${server.name} ERROR:`, err.message);
+    } finally {
+      sftp.end();
+    }
   }
 }
 
-async function start(){
-  for(const server of servers){
-    await downloadFromServer(server);
-  }
-  logger.info("🎉 All download + conversion completed.");
-}
-
-start();
+module.exports = downloadFromServers;
