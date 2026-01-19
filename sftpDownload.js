@@ -85,12 +85,19 @@ async function downloadFromServers() {
         console.log(`❌ No CSV files found in ${server.folder}`);
         continue;
       }
+      //remote 
+      // const remotePath = `${remoteDir}/${selected.name}`;
+      // const localPath = path.join(
+      //   DOWNLOAD_DIR,
+      //   `${server.name}_${selected.name}`
+      // );
 
-      const remotePath = `${remoteDir}/${selected.name}`;
+      const remotePath = `${remoteDir}/${server.localfile}`;
       const localPath = path.join(
         DOWNLOAD_DIR,
         `${server.localfile}`
       );
+
 
       await sftp.fastGet(remotePath, localPath);
       console.log(`✅ Downloaded → ${localPath}`);
