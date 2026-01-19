@@ -12,7 +12,8 @@ const servers = [
     username: "cwtarchive.five9",
     password: "4fWavmwAY3k49qRaIsFZ5LmbPzzP2qdK",
     folder: "AlvinACW",
-    port: 22
+    port: 22,
+    localfile: "For ZOHO _ Onshore Tier1 Agents - Daily ACW and On Call Time 251202_135949.csv"
   },
   {
     name: "AlvinRRFUBRLUNCH",
@@ -20,7 +21,8 @@ const servers = [
     username: "cwtarchive.five9",
     password: "4fWavmwAY3k49qRaIsFZ5LmbPzzP2qdK",
     folder: "AlvinRRFUBRLUNCH",
-    port: 22
+    port: 22,
+    localfile: "For ZOHO _ Onshore Tier1 Agents - Follow up Work, Restroom, Breaks and Lunch 251202_140046(in) .csv"
   }
 ];
 
@@ -87,7 +89,7 @@ async function downloadFromServers() {
       const remotePath = `${remoteDir}/${selected.name}`;
       const localPath = path.join(
         DOWNLOAD_DIR,
-        `${server.name}_${selected.name}`
+        `${server.localfile}`
       );
 
       await sftp.fastGet(remotePath, localPath);
