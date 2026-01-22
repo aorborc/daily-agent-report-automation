@@ -1,4 +1,4 @@
-// serverDownload.js
+
 const fs = require("fs");
 const path = require("path");
 const SftpClient = require("ssh2-sftp-client");
@@ -59,10 +59,10 @@ async function downloadFromServer() {
     // 1️⃣ Try today's file
     let selected = csvFiles.find(f => f.name.includes(todayPattern));
 
-    // 2️⃣ Fallback → latest available file
+     // 2️⃣ ✅ STRICT MODE: today file must exist
     if (!selected) {
-      console.log(`⚠ Today file not found. Using latest available file`);
-      selected = csvFiles[0];
+      console.log(`⏭ Today file not found yet. Skipping for now...`);
+      return null;
     }
 
     if (!selected) {

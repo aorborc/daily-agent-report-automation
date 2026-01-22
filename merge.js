@@ -3,7 +3,7 @@ const xlsx = require("xlsx");
 const fs = require("fs");
 const path = require("path");
 const sendEmail = require("./sendEmail");
-const downloadFromServers = require("./serverDownload");
+const downloadFromServers = require("./sftpDownload");
 
 // ✅ NEW: Store last processed file path here
 const LAST_FILE_PATH = path.join(__dirname, "lastProcessedFile.txt");
