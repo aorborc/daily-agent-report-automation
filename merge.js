@@ -1,144 +1,245 @@
 // mergeAndMail.js
-const xlsx = require('xlsx');
-const fs = require('fs');
-const path = require('path');
-const sendEmail = require('./sendEmail'); // your Resend module
-const downloadFromServers = require('./sftpDownload');
+const xlsx = require("xlsx");
+const fs = require("fs");
+const path = require("path");
+const sendEmail = require("./sendEmail");
+const downloadFromServers = require("./serverDownload");
 
-// ---------------------------------
-// Convert minutes → Hours
-// ---------------------------------
-// function formatMinutesToHours(mins) {
-//     const h = Math.floor(mins / 60);
-//     const m = mins % 60;
-//     return `${h}h ${m}m`;
-// }
+// ✅ NEW: Store last processed file path here
+const LAST_FILE_PATH = path.join(__dirname, "lastProcessedFile.txt");
 
-// ---------------------------------
-// Helpers
-// ---------------------------------
-function timeToMinutes(t) {
-  if (!t || t === "0" || t === "0:00:00") return 0;
-  if (!isNaN(t) && t.toString().indexOf(":") === -1) {
-    return Math.round(Number(t));
+// -----------------------------
+// Time Helpers
+// -----------------------------
+
+// "HH:MM:SS" -> seconds
+function timeToSeconds(t) {
+  if (!t) return 0;
+
+  const str = t.toString().trim();
+  if (!str) return 0;
+
+  // numeric value case
+  if (!isNaN(str) && str.indexOf(":") === -1) {
+    return Number(str);
   }
-  const parts = t.toString().split(":").map(Number);
+
+  const parts = str.split(":").map(Number);
   const h = parts[0] || 0;
   const m = parts[1] || 0;
   const s = parts[2] || 0;
-  const total = h * 60 + m + s / 60;
-  return Math.round(total);
+
+  return h * 3600 + m * 60 + s;
 }
 
-function formatMinutesToHours2(mins) {
-  const total = Math.round(mins);
-  const h = Math.floor(total / 60);
-  const m = total % 60;
-  return `${h}h ${m}m`;
+// seconds -> "HH:MM:SS"
+function secondsToTime(sec) {
+  const total = Math.max(0, Math.round(sec));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(
+    2,
+    "0"
+  )}:${String(s).padStart(2, "0")}`;
 }
 
-// ---------------------------------
-// HTML Email Body
-// ---------------------------------
+// avg time = totalSeconds / calls
+function calcAvg(totalSeconds, calls) {
+  if (!calls || calls <= 0) return "00:00:00";
+  return secondsToTime(totalSeconds / calls);
+}
+
+// -----------------------------
+// ✅ NEW: Duplicate file skip helpers
+// -----------------------------
+function getLastProcessedFile() {
+  try {
+    if (!fs.existsSync(LAST_FILE_PATH)) return null;
+    return fs.readFileSync(LAST_FILE_PATH, "utf8").trim();
+  } catch (err) {
+    return null;
+  }
+}
+
+function setLastProcessedFile(filePath) {
+  try {
+    fs.writeFileSync(LAST_FILE_PATH, filePath, "utf8");
+  } catch (err) {
+    console.log("❌ Unable to save last processed file:", err.message);
+  }
+}
+
+// -----------------------------
+// HTML Email Body (NEW FORMAT)
+// -----------------------------
 function generateEmail(agent, date_str) {
-  const name = agent["AGENT NAME"] || agent.AGENT || "Agent";
-  const acw       = timeToMinutes(agent["After Call Work / AGENT STATE TIME"]);
-  const restroom  = timeToMinutes(agent["Restroom / AGENT STATE TIME"]);
-  const brk       = timeToMinutes(agent["Break / AGENT STATE TIME"]);
-  const lunch     = timeToMinutes(agent["Lunch / AGENT STATE TIME"]);
-  const followUp  = timeToMinutes(agent["Follow-Up Work / AGENT STATE TIME"]);
+  const fullName = `${agent["AGENT FIRST NAME"] || ""} ${
+    agent["AGENT LAST NAME"] || ""
+  }`.trim();
 
-  const total = acw + restroom + brk + lunch + followUp;
-  const totalHours = formatMinutesToHours2(total);
+  const displayName = fullName || agent.AGENT || "Agent";
 
   return `
-  <p style="margin-bottom:12px;">Hello <b>${name}</b>,</p>
-  <p style="margin-bottom:12px;">Here are your activity stats for <b>${date_str}</b>:</p>
+    <p style="margin-bottom:12px;">Hello <b>${displayName}</b>,</p>
+    <p style="margin-bottom:12px;">Here is your activity stats for <b>${date_str}</b>:</p>
 
-  <div style="background:#fdf7f5;border-left:4px solid #6A3826;padding:12px 15px;font-size:15px;margin:18px 0;color:#6A3826;">
-    <p><b>After Call Work:</b> ${acw} mins</p>
-    <p><b>Restroom:</b> ${restroom} mins</p>
-    <p><b>Break:</b> ${brk} mins</p>
-    <p><b>Lunch:</b> ${lunch} mins</p>
-    <p><b>Follow-Up:</b> ${followUp} mins</p>
-    <hr style="border:none;border-top:1px solid #ccc;margin:10px 0;">
-    <p style="font-size:16px;"><b>Total Hours:</b> ${totalHours}</p>
-  </div>
+    <div style="background:#fdf7f5;border-left:4px solid #6A3826;padding:12px 15px;font-size:15px;margin:18px 0;color:#6A3826;">
+      <p><b>Email (AGENT):</b> ${agent.AGENT}</p>
+      <p><b>Calls Count:</b> ${agent["CALLS count"]}</p>
 
-  <p>If you have any questions, please contact your supervisor.</p>
-  <p style="margin-top:25px;font-size:13px;color:#777;">Thank you,<br>HIW Marketing LLC Team</p>
+      <hr style="border:none;border-top:1px solid #ccc;margin:10px 0;">
+
+      <p><b>Handle Time:</b> ${agent["HANDLE TIME"]}</p>
+      <p><b>Avg Handle Time:</b> ${agent["Average HANDLE TIME"]}</p>
+
+      <p><b>Talk Time:</b> ${agent["TALK TIME"]}</p>
+      <p><b>Avg Talk Time:</b> ${agent["Average TALK TIME"]}</p>
+
+      <p><b>After Call Work Time:</b> ${agent["AFTER CALL WORK TIME"]}</p>
+      <p><b>Avg After Call Work Time:</b> ${agent["Average AFTER CALL WORK TIME"]}</p>
+    </div>
+
+    <p style="margin-top:25px;font-size:13px;color:#777;">
+      Thank you,<br>HIW Marketing LLC Team
+    </p>
   `;
 }
 
-// ---------------------------------
+// -----------------------------
 // MAIN
-// ---------------------------------
+// -----------------------------
 async function mergeAndMail() {
+  // ✅ STEP 1: Download from AlvinACW server
+  const downloadedFilePath = await downloadFromServers();
 
-    // 🔽 NEW STEP: Download from SFTP servers
-    await downloadFromServers();
+  if (!downloadedFilePath) {
+    console.log("❌ No file downloaded.");
+    return;
+  }
 
-    const dir = path.join(__dirname, "downloads");
+  console.log("✅ Downloaded File:", downloadedFilePath);
 
-    const files = fs.readdirSync(dir)
-      .filter(f => f.endsWith(".csv") || f.endsWith(".xlsx"));
+  // ✅ NEW STEP: If same file already processed, SKIP sending mail
+  const lastFile = getLastProcessedFile();
 
-    if (files.length < 2) {
-      console.log("❌ Need at least 2 files to merge");
-      return;
+  if (lastFile && lastFile === downloadedFilePath) {
+    console.log("⏭ No new file found (same as last processed). Skipping email...");
+    return;
+  }
+
+  // ✅ STEP 2: Read that single file
+  const wb = xlsx.readFile(downloadedFilePath);
+  const sheet = wb.Sheets[wb.SheetNames[0]];
+  const rows = xlsx.utils.sheet_to_json(sheet, { defval: "" });
+
+  if (!rows.length) {
+    console.log("❌ No data rows found in sheet");
+    return;
+  }
+
+  // ✅ STEP 3: Group + Combine duplicate AGENT email rows
+  const map = new Map();
+
+  rows.forEach((r) => {
+    const email = (r["AGENT"] || "").toString().trim();
+    if (!email) return;
+
+    const calls = Number(r["CALLS count"] || 0);
+    const handleSec = timeToSeconds(r["HANDLE TIME"]);
+    const talkSec = timeToSeconds(r["TALK TIME"]);
+    const acwSec = timeToSeconds(r["AFTER CALL WORK TIME"]);
+
+    if (!map.has(email)) {
+      map.set(email, {
+        "AGENT GROUP": r["AGENT GROUP"] || "",
+        AGENT: email,
+        "AGENT FIRST NAME": r["AGENT FIRST NAME"] || "",
+        "AGENT LAST NAME": r["AGENT LAST NAME"] || "",
+
+        TOTAL_CALLS: 0,
+        TOTAL_HANDLE: 0,
+        TOTAL_TALK: 0,
+        TOTAL_ACW: 0,
+      });
     }
 
-    console.log("📄 Files:", files);
+    const a = map.get(email);
 
-    const file1 = path.join(dir, files[0]);
-    const file2 = path.join(dir, files[1]);
+    // fill missing names if first row empty
+    if (!a["AGENT FIRST NAME"] && r["AGENT FIRST NAME"])
+      a["AGENT FIRST NAME"] = r["AGENT FIRST NAME"];
 
-    const wb1 = xlsx.readFile(file1);
-    const wb2 = xlsx.readFile(file2);
+    if (!a["AGENT LAST NAME"] && r["AGENT LAST NAME"])
+      a["AGENT LAST NAME"] = r["AGENT LAST NAME"];
 
-    const s1 = xlsx.utils.sheet_to_json(wb1.Sheets[wb1.SheetNames[0]]);
-    const s2 = xlsx.utils.sheet_to_json(wb2.Sheets[wb2.SheetNames[0]]);
+    if (!a["AGENT GROUP"] && r["AGENT GROUP"])
+      a["AGENT GROUP"] = r["AGENT GROUP"];
 
-    // Merge by AGENT
-    const map = new Map();
-    s1.forEach(r => r.AGENT && map.set(r.AGENT, { ...r }));
-    s2.forEach(r => {
-        if (r.AGENT) {
-          map.set(
-            r.AGENT,
-            map.has(r.AGENT) ? { ...map.get(r.AGENT), ...r } : r
-          );
-        }
-    });
+    // add totals (2 rows -> summed)
+    a.TOTAL_CALLS += calls;
+    a.TOTAL_HANDLE += handleSec;
+    a.TOTAL_TALK += talkSec;
+    a.TOTAL_ACW += acwSec;
 
-    const final = Array.from(map.values());
+    map.set(email, a);
+  });
 
-    const outfile = path.join(dir, "Merged_Final.csv");
-    const csv = xlsx.utils.sheet_to_csv(
-      xlsx.utils.json_to_sheet(final)
-    );
-    fs.writeFileSync(outfile, csv);
+  // ✅ STEP 4: Create final agent list with recalculated averages
+  const final = Array.from(map.values()).map((a) => {
+    return {
+      "AGENT GROUP": a["AGENT GROUP"],
+      AGENT: a.AGENT,
+      "AGENT FIRST NAME": a["AGENT FIRST NAME"],
+      "AGENT LAST NAME": a["AGENT LAST NAME"],
 
-    console.log("✅ Merged File Created →", outfile);
+      "CALLS count": a.TOTAL_CALLS,
 
-    if (final.length < 2) {
-      console.log("❌ Not enough agents for mailing");
-      return;
-    }
+      "HANDLE TIME": secondsToTime(a.TOTAL_HANDLE),
+      "Average HANDLE TIME": calcAvg(a.TOTAL_HANDLE, a.TOTAL_CALLS),
 
-    const shuffled = final.sort(() => 0.5 - Math.random());
-    const two = shuffled.slice(0, 2);
+      "TALK TIME": secondsToTime(a.TOTAL_TALK),
+      "Average TALK TIME": calcAvg(a.TOTAL_TALK, a.TOTAL_CALLS),
 
-    const date = new Date().toISOString().split("T")[0];
+      "AFTER CALL WORK TIME": secondsToTime(a.TOTAL_ACW),
+      "Average AFTER CALL WORK TIME": calcAvg(a.TOTAL_ACW, a.TOTAL_CALLS),
+    };
+  });
 
-    for (let i = 0; i < two.length; i++) {
-        const agent = two[i];
-        const html = generateEmail(agent, date);
-        const subject = `Daily Activity Report - ${agent.AGENT_NAME || agent.AGENT}`;
-        await sendEmail(subject, html);
-    }
+  console.log("✅ Total unique agents:", final.length);
 
-    console.log("\n🎉 Completed → Reports sent to 2 random agents");
+  // ✅ STEP 5: Save summary output CSV (optional)
+  const dir = path.join(__dirname, "downloads");
+  const outFile = path.join(dir, "AlvinACW_AgentSummary.csv");
+  const csv = xlsx.utils.sheet_to_csv(xlsx.utils.json_to_sheet(final));
+  fs.writeFileSync(outFile, csv);
+  console.log("✅ Summary File Created →", outFile);
+
+  // ✅ STEP 6: Demo mail -> first 2 agents only
+  const firstTwo = final.slice(0, 2);
+
+  if (firstTwo.length === 0) {
+    console.log("❌ No agents to email");
+    return;
+  }
+
+  const date = new Date().toISOString().split("T")[0];
+
+  for (let i = 0; i < firstTwo.length; i++) {
+    const agent = firstTwo[i];
+
+    const subject = `Hourly Activity Report - ${agent.AGENT}`;
+    const html = generateEmail(agent, date);
+
+    // ✅ still goes to fixed emails (jordan + vijay) via sendEmail.js
+    await sendEmail(subject, html);
+  }
+
+  // ✅ NEW: Mark this file as processed so next 5-min run won't resend
+  setLastProcessedFile(downloadedFilePath);
+
+  console.log("\n🎉 Completed → Reports sent for first 2 agents (demo)");
 }
 
 mergeAndMail();
