@@ -2,11 +2,48 @@
 const xlsx = require("xlsx");
 const fs = require("fs");
 const path = require("path");
+const winston = require("winston");
+
 const sendEmail = require("./sendEmail");
 const downloadFromServers = require("./sftpDownload");
 
-// ✅ NEW: Store last processed file path here
-const LAST_FILE_PATH = path.join(__dirname, "lastProcessedFile.txt");
+// ✅ Store last processed file path here (inside state folder)
+const STATE_DIR = path.join(__dirname, "state");
+const LAST_FILE_PATH = path.join(STATE_DIR, "lastProcessedFile.txt");
+
+
+// ✅ Logs folder + daily log file
+const LOGS_DIR = path.join(__dirname, "logs");
+
+// -----------------------------
+// Logger Setup (Winston)
+// -----------------------------
+function getTodayDateString() {
+  return new Date().toISOString().split("T")[0]; // YYYY-MM-DD
+}
+
+function createLogger() {
+  if (!fs.existsSync(LOGS_DIR)) {
+    fs.mkdirSync(LOGS_DIR, { recursive: true });
+  }
+
+  const today = getTodayDateString();
+  const logFilePath = path.join(LOGS_DIR, `${today}.log`);
+
+  return winston.createLogger({
+    level: "info",
+    format: winston.format.combine(
+      winston.format.timestamp({ format: "YYYY-MM-DD HH:mm:ss" }),
+      winston.format.printf(
+        (info) => `${info.timestamp} [${info.level.toUpperCase()}] ${info.message}`
+      )
+    ),
+    transports: [
+      new winston.transports.File({ filename: logFilePath }),
+      new winston.transports.Console()
+    ]
+  });
+}
 
 // -----------------------------
 // Time Helpers
@@ -52,7 +89,7 @@ function calcAvg(totalSeconds, calls) {
 }
 
 // -----------------------------
-// ✅ NEW: Duplicate file skip helpers
+// Duplicate file skip helpers
 // -----------------------------
 function getLastProcessedFile() {
   try {
@@ -65,14 +102,18 @@ function getLastProcessedFile() {
 
 function setLastProcessedFile(filePath) {
   try {
+    if (!fs.existsSync(STATE_DIR)) {
+      fs.mkdirSync(STATE_DIR, { recursive: true });
+    }
     fs.writeFileSync(LAST_FILE_PATH, filePath, "utf8");
   } catch (err) {
     console.log("❌ Unable to save last processed file:", err.message);
   }
 }
 
+
 // -----------------------------
-// HTML Email Body (NEW FORMAT)
+// HTML Email Body
 // -----------------------------
 function generateEmail(agent, date_str) {
   const fullName = `${agent["AGENT FIRST NAME"] || ""} ${
@@ -111,21 +152,25 @@ function generateEmail(agent, date_str) {
 // MAIN
 // -----------------------------
 async function mergeAndMail() {
+  const logger = createLogger();
+
+  logger.info("🚀 mergeAndMail job started");
+
   // ✅ STEP 1: Download from AlvinACW server
   const downloadedFilePath = await downloadFromServers();
 
   if (!downloadedFilePath) {
-    console.log("❌ No file downloaded.");
+    logger.info("⏭ No file downloaded (today file not available). Skipping run.");
     return;
   }
 
-  console.log("✅ Downloaded File:", downloadedFilePath);
+  logger.info(`✅ Downloaded File: ${downloadedFilePath}`);
 
-  // ✅ NEW STEP: If same file already processed, SKIP sending mail
+  // ✅ If same file already processed, SKIP sending mail
   const lastFile = getLastProcessedFile();
 
   if (lastFile && lastFile === downloadedFilePath) {
-    console.log("⏭ No new file found (same as last processed). Skipping email...");
+    logger.info("⏭ No new file found (same as last processed). Skipping email...");
     return;
   }
 
@@ -135,7 +180,7 @@ async function mergeAndMail() {
   const rows = xlsx.utils.sheet_to_json(sheet, { defval: "" });
 
   if (!rows.length) {
-    console.log("❌ No data rows found in sheet");
+    logger.error("❌ No data rows found in sheet");
     return;
   }
 
@@ -207,24 +252,27 @@ async function mergeAndMail() {
     };
   });
 
-  console.log("✅ Total unique agents:", final.length);
+  logger.info(`✅ Total unique agents: ${final.length}`);
 
   // ✅ STEP 5: Save summary output CSV (optional)
   const dir = path.join(__dirname, "downloads");
   const outFile = path.join(dir, "AlvinACW_AgentSummary.csv");
   const csv = xlsx.utils.sheet_to_csv(xlsx.utils.json_to_sheet(final));
   fs.writeFileSync(outFile, csv);
-  console.log("✅ Summary File Created →", outFile);
+  logger.info(`✅ Summary File Created → ${outFile}`);
 
   // ✅ STEP 6: Demo mail -> first 2 agents only
   const firstTwo = final.slice(0, 2);
 
   if (firstTwo.length === 0) {
-    console.log("❌ No agents to email");
+    logger.error("❌ No agents to email");
     return;
   }
 
   const date = new Date().toISOString().split("T")[0];
+
+  let successCount = 0;
+  let failCount = 0;
 
   for (let i = 0; i < firstTwo.length; i++) {
     const agent = firstTwo[i];
@@ -232,14 +280,22 @@ async function mergeAndMail() {
     const subject = `Hourly Activity Report - ${agent.AGENT}`;
     const html = generateEmail(agent, date);
 
-    // ✅ still goes to fixed emails (jordan + vijay) via sendEmail.js
-    await sendEmail(subject, html);
+    try {
+      await sendEmail(subject, html);
+      successCount++;
+      logger.info(`📧 Email sent successfully: ${subject}`);
+    } catch (err) {
+      failCount++;
+      logger.error(`❌ Email failed: ${subject} | ${err.message}`);
+    }
   }
 
-  // ✅ NEW: Mark this file as processed so next 5-min run won't resend
+  logger.info(`✅ Email Summary: Success=${successCount}, Failed=${failCount}`);
+
+  // ✅ Mark this file as processed so next 5-min run won't resend
   setLastProcessedFile(downloadedFilePath);
 
-  console.log("\n🎉 Completed → Reports sent for first 2 agents (demo)");
+  logger.info("🎉 Completed → Reports sent for first 2 agents (demo)");
 }
 
 mergeAndMail();
