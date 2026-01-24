@@ -10,6 +10,8 @@ const downloadFromServers = require("./sftpDownload");
 // ✅ Store last processed file path here (inside state folder)
 const STATE_DIR = path.join(__dirname, "state");
 const LAST_FILE_PATH = path.join(STATE_DIR, "lastProcessedFile.txt");
+const LAST_RUN_TIME_PATH = path.join(STATE_DIR, "lastRunTime.txt");
+
 
 
 // ✅ Logs folder + daily log file
@@ -111,6 +113,27 @@ function setLastProcessedFile(filePath) {
   }
 }
 
+function getLastRunTime() {
+  try {
+    if (!fs.existsSync(LAST_RUN_TIME_PATH)) return 0;
+    return Number(fs.readFileSync(LAST_RUN_TIME_PATH, "utf8").trim()) || 0;
+  } catch (err) {
+    return 0;
+  }
+}
+
+function setLastRunTime(timestamp) {
+  try {
+    if (!fs.existsSync(STATE_DIR)) {
+      fs.mkdirSync(STATE_DIR, { recursive: true });
+    }
+    fs.writeFileSync(LAST_RUN_TIME_PATH, String(timestamp), "utf8");
+  } catch (err) {
+    console.log("❌ Unable to save last run time:", err.message);
+  }
+}
+
+
 
 // -----------------------------
 // HTML Email Body
@@ -156,8 +179,20 @@ async function mergeAndMail() {
 
   logger.info("🚀 mergeAndMail job started");
 
+  const now = Date.now();
+  const lastRun = getLastRunTime();
+  const diffMinutes = (now - lastRun) / (1000 * 60);
+
+  if (lastRun && diffMinutes < 10) {
+    logger.info(`⏭ Skipping run (only ${diffMinutes.toFixed(1)} min passed). Waiting for 10 min gap...`);
+    return;
+  }
+
+  setLastRunTime(now);
+
   // ✅ STEP 1: Download from AlvinACW server
   const downloadedFilePath = await downloadFromServers();
+
 
   if (!downloadedFilePath) {
     logger.info("⏭ No file downloaded (today file not available). Skipping run.");
