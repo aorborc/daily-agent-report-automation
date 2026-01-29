@@ -7,6 +7,36 @@ const winston = require("winston");
 const sendEmail = require("./sendEmail");
 const downloadFromServers = require("./sftpDownload");
 
+function deleteDownloadedFile(filePath, logger) {
+  try {
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+      logger.info(`🗑 Deleted processed file: ${filePath}`);
+    }
+  } catch (err) {
+    logger.error(`❌ File delete failed: ${err.message}`);
+  }
+}
+function cleanupYesterdayFolder(logger) {
+  const BASE_DOWNLOAD_DIR = path.join(__dirname, "downloads");
+
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  const dateStr = yesterday.toISOString().split("T")[0];
+
+  const folderPath = path.join(BASE_DOWNLOAD_DIR, dateStr);
+
+  try {
+    if (fs.existsSync(folderPath)) {
+      fs.rmSync(folderPath, { recursive: true, force: true });
+      logger.info(`🧹 Deleted yesterday folder: ${folderPath}`);
+    }
+  } catch (err) {
+    logger.error(`❌ Folder cleanup failed: ${err.message}`);
+  }
+}
+
+
 // ✅ Store last processed file path here (inside state folder)
 const STATE_DIR = path.join(__dirname, "state");
 const LAST_FILE_PATH = path.join(STATE_DIR, "lastProcessedFile.txt");
@@ -176,6 +206,9 @@ function generateEmail(agent, date_str) {
 // -----------------------------
 async function mergeAndMail() {
   const logger = createLogger();
+  // 🌙 Daily cleanup (runs safely even if folder not exists)
+cleanupYesterdayFolder(logger);
+
 
   logger.info("🚀 mergeAndMail job started");
 
@@ -325,12 +358,18 @@ async function mergeAndMail() {
     }
   }
 
-  logger.info(`✅ Email Summary: Success=${successCount}, Failed=${failCount}`);
+ logger.info(`✅ Email Summary: Success=${successCount}, Failed=${failCount}`);
 
-  // ✅ Mark this file as processed so next 5-min run won't resend
-  setLastProcessedFile(downloadedFilePath);
+// ✅ Mark file processed
+setLastProcessedFile(downloadedFilePath);
 
-  logger.info("🎉 Completed → Reports sent for first 2 agents (demo)");
+// ✅ DELETE FILE only if at least one mail sent
+if (successCount > 0) {
+  deleteDownloadedFile(downloadedFilePath, logger);
+}
+
+logger.info("🎉 Completed → Reports sent");
+
 }
 
 mergeAndMail();

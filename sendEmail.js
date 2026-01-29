@@ -1,10 +1,10 @@
 const { Resend } = require('resend');
-const resend = new Resend("re_8VXvL6zU_CvP9ncA5euZihFWACeGYj8NK");
+const resend = new Resend("re_ZRQUM3xt_Gbv4ycEpHDSmWQQeFxF538vY");
 
 const sendEmail = async (subject, htmlBody) => {
   try {
     const { data, error } = await resend.emails.send({
-     from: "vijay@aorborc.com",
+     from: " info@hiwmllc.com",
       to: ["jordan@aorborc.com","vijay@aorborc.com",],
       subject: subject,
       html: htmlBody,
