@@ -458,7 +458,7 @@ if (successCount > 0) {
 // 📧 ADMIN MAIL – SCRIPT ENDED (ONLY ONCE PER DAY)  ✅ CORRECT PLACE
 const currentHour = new Date().getHours();
 
-if (currentHour >= 18 && !isScriptEndedToday()) {
+if (currentHour >= 20 && !isScriptEndedToday()) {
   const totalSheets = getTodaySheetCount();
 
  await sendEmail(
