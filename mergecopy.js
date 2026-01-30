@@ -7,43 +7,6 @@ const winston = require("winston");
 const sendEmail = require("./sendEmail");
 const downloadFromServers = require("./sftpDownload");
 
-// -----------------------------
-// STATE PATHS (MUST COME FIRST)
-// -----------------------------
-const STATE_DIR = path.join(__dirname, "state");
-const LAST_FILE_PATH = path.join(STATE_DIR, "lastProcessedFile.txt");
-const LAST_RUN_TIME_PATH = path.join(STATE_DIR, "lastRunTime.txt");
-
-// ✅ Script start flag (NOW SAFE)
-const SCRIPT_START_FLAG = path.join(STATE_DIR, "scriptStarted.txt");
-
-const SCRIPT_END_FLAG = path.join(STATE_DIR, "scriptEnded.txt");
-// ✅ Sheet count file
-const SHEET_COUNT_FILE = path.join(STATE_DIR, "todaySheetCount.txt");
-
-// -----------------------------
-// SCRIPT START HELPERS
-// -----------------------------
-function isScriptStartedToday() {
-  try {
-    if (!fs.existsSync(SCRIPT_START_FLAG)) return false;
-    const savedDate = fs.readFileSync(SCRIPT_START_FLAG, "utf8").trim();
-    return savedDate === getTodayDateString();
-  } catch {
-    return false;
-  }
-}
-
-function markScriptStartedToday() {
-  if (!fs.existsSync(STATE_DIR)) {
-    fs.mkdirSync(STATE_DIR, { recursive: true });
-  }
-  fs.writeFileSync(SCRIPT_START_FLAG, getTodayDateString(), "utf8");
-}
-
-// -----------------------------
-// FILE CLEANUP HELPERS
-// -----------------------------
 function deleteDownloadedFile(filePath, logger) {
   try {
     if (fs.existsSync(filePath)) {
@@ -54,7 +17,6 @@ function deleteDownloadedFile(filePath, logger) {
     logger.error(`❌ File delete failed: ${err.message}`);
   }
 }
-
 function cleanupYesterdayFolder(logger) {
   const BASE_DOWNLOAD_DIR = path.join(__dirname, "downloads");
 
@@ -73,46 +35,20 @@ function cleanupYesterdayFolder(logger) {
     logger.error(`❌ Folder cleanup failed: ${err.message}`);
   }
 }
-function incrementTodaySheetCount() {
-  let count = 0;
-  if (fs.existsSync(SHEET_COUNT_FILE)) {
-    count = Number(fs.readFileSync(SHEET_COUNT_FILE, "utf8")) || 0;
-  }
-  fs.writeFileSync(SHEET_COUNT_FILE, String(count + 1), "utf8");
-}
 
-function getTodaySheetCount() {
-  if (!fs.existsSync(SHEET_COUNT_FILE)) return 0;
-  return Number(fs.readFileSync(SHEET_COUNT_FILE, "utf8")) || 0;
-}
 
-function resetTodaySheetCount() {
-  if (fs.existsSync(SHEET_COUNT_FILE)) {
-    fs.unlinkSync(SHEET_COUNT_FILE);
-  }
-}
+// ✅ Store last processed file path here (inside state folder)
+const STATE_DIR = path.join(__dirname, "state");
+const LAST_FILE_PATH = path.join(STATE_DIR, "lastProcessedFile.txt");
+const LAST_RUN_TIME_PATH = path.join(STATE_DIR, "lastRunTime.txt");
 
-function isScriptEndedToday() {
-  try {
-    if (!fs.existsSync(SCRIPT_END_FLAG)) return false;
-    const savedDate = fs.readFileSync(SCRIPT_END_FLAG, "utf8").trim();
-    return savedDate === getTodayDateString();
-  } catch {
-    return false;
-  }
-}
 
-function markScriptEndedToday() {
-  fs.writeFileSync(SCRIPT_END_FLAG, getTodayDateString(), "utf8");
-}
 
-// -----------------------------
-// LOGS
-// -----------------------------
+// ✅ Logs folder + daily log file
 const LOGS_DIR = path.join(__dirname, "logs");
 
 // -----------------------------
-// LOGGER SETUP
+// Logger Setup (Winston)
 // -----------------------------
 function getTodayDateString() {
   return new Date().toISOString().split("T")[0]; // YYYY-MM-DD
@@ -141,6 +77,7 @@ function createLogger() {
   });
 }
 
+// -----------------------------
 // Time Helpers
 // -----------------------------
 
@@ -283,22 +220,6 @@ cleanupYesterdayFolder(logger);
     logger.info(`⏭ Skipping run (only ${diffMinutes.toFixed(1)} min passed). Waiting for 10 min gap...`);
     return;
   }
-// 📧 ADMIN MAIL – SCRIPT STARTED (ONLY ONCE PER DAY)
-if (!isScriptStartedToday()) {
-  await sendEmail(
-    ["jordan@aorborc.com", "vijay@aorborc.com"],
-    `✅ Daily Agent Script Started - ${getTodayDateString()}`,
-    `
-      <p>Hello Team,</p>
-      <p>The daily agent report script has <b>STARTED</b>.</p>
-      <p><b>Start Time:</b> ${new Date().toLocaleString()}</p>
-      <br>
-      <p>— System</p>
-    `
-  );
-
-  markScriptStartedToday();
-}
 
   setLastRunTime(now);
 
@@ -312,8 +233,6 @@ if (!isScriptStartedToday()) {
   }
 
   logger.info(`✅ Downloaded File: ${downloadedFilePath}`);
- 
-
 
   // ✅ If same file already processed, SKIP sending mail
   const lastFile = getLastProcessedFile();
@@ -322,8 +241,6 @@ if (!isScriptStartedToday()) {
     logger.info("⏭ No new file found (same as last processed). Skipping email...");
     return;
   }
-  // ✅ Count ONLY when it is a NEW sheet
-incrementTodaySheetCount();
 
   // ✅ STEP 2: Read that single file
   const wb = xlsx.readFile(downloadedFilePath);
@@ -412,38 +329,34 @@ incrementTodaySheetCount();
   fs.writeFileSync(outFile, csv);
   logger.info(`✅ Summary File Created → ${outFile}`);
 
- // ✅ STEP 6: Send mail to ALL agents
-if (final.length === 0) {
-  logger.error("❌ No agents to email");
-  return;
-}
+  // ✅ STEP 6: Demo mail -> first 2 agents only
+  const firstTwo = final.slice(0, 2);
+
+  if (firstTwo.length === 0) {
+    logger.error("❌ No agents to email");
+    return;
+  }
 
   const date = new Date().toISOString().split("T")[0];
 
   let successCount = 0;
   let failCount = 0;
 
- for (let i = 0; i < final.length; i++) {
-  const agent = final[i];
+  for (let i = 0; i < firstTwo.length; i++) {
+    const agent = firstTwo[i];
 
-  if (!agent.AGENT) {
-    logger.warn("⚠️ Skipping agent without email");
-    continue;
+    const subject = `Hourly Activity Report - ${agent.AGENT}`;
+    const html = generateEmail(agent, date);
+
+    try {
+      await sendEmail(subject, html);
+      successCount++;
+      logger.info(`📧 Email sent successfully: ${subject}`);
+    } catch (err) {
+      failCount++;
+      logger.error(`❌ Email failed: ${subject} | ${err.message}`);
+    }
   }
-
-  const subject = `Hourly Activity Report - ${date}`;
-  const html = generateEmail(agent, date);
-
-  try {
-    await sendEmail(agent.AGENT, subject, html);
-    successCount++;
-    logger.info(`📧 Email sent successfully: ${agent.AGENT}`);
-  } catch (err) {
-    failCount++;
-    logger.error(`❌ Email failed to ${agent.AGENT} | ${err.message}`);
-  }
-}
-
 
  logger.info(`✅ Email Summary: Success=${successCount}, Failed=${failCount}`);
 
@@ -453,31 +366,6 @@ setLastProcessedFile(downloadedFilePath);
 // ✅ DELETE FILE only if at least one mail sent
 if (successCount > 0) {
   deleteDownloadedFile(downloadedFilePath, logger);
-}
-
-// 📧 ADMIN MAIL – SCRIPT ENDED (ONLY ONCE PER DAY)  ✅ CORRECT PLACE
-const currentHour = new Date().getHours();
-
-if (currentHour >= 18 && !isScriptEndedToday()) {
-  const totalSheets = getTodaySheetCount();
-
- await sendEmail(
-  ["jordan@aorborc.com", "vijay@aorborc.com"],
-  `🛑 Daily Agent Script Ended - ${getTodayDateString()}`,
-  `
-    <p>Hello Team,</p>
-    <p>The daily agent report script has <b>ENDED</b>.</p>
-    <p><b>Date:</b> ${getTodayDateString()}</p>
-    <p><b>Total Sheets Processed Today:</b> ${getTodaySheetCount()}</p>
-    <p><b>End Time:</b> ${new Date().toLocaleString()}</p>
-    <br>
-    <p>— System</p>
-  `
-);
-
-
-  markScriptEndedToday();
-  resetTodaySheetCount();
 }
 
 logger.info("🎉 Completed → Reports sent");

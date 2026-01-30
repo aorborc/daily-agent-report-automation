@@ -1,12 +1,12 @@
 const { Resend } = require('resend');
 const resend = new Resend("re_ZRQUM3xt_Gbv4ycEpHDSmWQQeFxF538vY");
 
-const sendEmail = async (subject, htmlBody) => {
+const sendEmail = async (to, subject, htmlBody) => {
   try {
-    const { data, error } = await resend.emails.send({
-     from: " info@hiwmllc.com",
-      to: ["jordan@aorborc.com","vijay@aorborc.com",],
-      subject: subject,
+    const { error } = await resend.emails.send({
+      from: "info@hiwmllc.com",
+      to: Array.isArray(to) ? to : [to],
+      subject,
       html: htmlBody,
     });
 
@@ -16,7 +16,7 @@ const sendEmail = async (subject, htmlBody) => {
       console.log(`📧 Email sent successfully: ${subject}`);
     }
   } catch (err) {
-    console.log('❌ Email sending error:', err);
+    console.log("❌ Email sending error:", err);
   }
 };
 
