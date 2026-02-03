@@ -1,12 +1,3 @@
-// mergeAndMail.js
-const xlsx = require("xlsx");
-const fs = require("fs");
-const path = require("path");
-const winston = require("winston");
-
-const sendEmail = require("./sendEmail");
-const downloadFromServers = require("./sftpDownload");
-
 // -----------------------------
 // STATE PATHS (MUST COME FIRST)
 // -----------------------------
@@ -14,21 +5,40 @@ const STATE_DIR = path.join(__dirname, "state");
 const LAST_FILE_PATH = path.join(STATE_DIR, "lastProcessedFile.txt");
 const LAST_RUN_TIME_PATH = path.join(STATE_DIR, "lastRunTime.txt");
 
-// ✅ Script start flag (NOW SAFE)
+// ✅ Script start / end flags
 const SCRIPT_START_FLAG = path.join(STATE_DIR, "scriptStarted.txt");
-
 const SCRIPT_END_FLAG = path.join(STATE_DIR, "scriptEnded.txt");
+
 // ✅ Sheet count file
 const SHEET_COUNT_FILE = path.join(STATE_DIR, "todaySheetCount.txt");
 
 // -----------------------------
-// SCRIPT START HELPERS
+// LOS ANGELES TIME HELPERS
+// -----------------------------
+function getLADate() {
+  return new Date(
+    new Date().toLocaleString("en-US", {
+      timeZone: "America/Los_Angeles",
+    })
+  );
+}
+
+function getLADateString() {
+  return getLADate().toISOString().split("T")[0]; // YYYY-MM-DD (LA)
+}
+
+function getLAHour() {
+  return getLADate().getHours(); // 0–23 (LA)
+}
+
+// -----------------------------
+// SCRIPT START HELPERS (LA SAFE)
 // -----------------------------
 function isScriptStartedToday() {
   try {
     if (!fs.existsSync(SCRIPT_START_FLAG)) return false;
     const savedDate = fs.readFileSync(SCRIPT_START_FLAG, "utf8").trim();
-    return savedDate === getTodayDateString();
+    return savedDate === getLADateString(); // ✅ LA date
   } catch {
     return false;
   }
@@ -38,11 +48,11 @@ function markScriptStartedToday() {
   if (!fs.existsSync(STATE_DIR)) {
     fs.mkdirSync(STATE_DIR, { recursive: true });
   }
-  fs.writeFileSync(SCRIPT_START_FLAG, getTodayDateString(), "utf8");
+  fs.writeFileSync(SCRIPT_START_FLAG, getLADateString(), "utf8"); // ✅ LA date
 }
 
 // -----------------------------
-// FILE CLEANUP HELPERS
+// FILE CLEANUP HELPERS (LA SAFE)
 // -----------------------------
 function deleteDownloadedFile(filePath, logger) {
   try {
@@ -58,7 +68,8 @@ function deleteDownloadedFile(filePath, logger) {
 function cleanupYesterdayFolder(logger) {
   const BASE_DOWNLOAD_DIR = path.join(__dirname, "downloads");
 
-  const yesterday = new Date();
+  // ✅ LA-based yesterday
+  const yesterday = getLADate();
   yesterday.setDate(yesterday.getDate() - 1);
   const dateStr = yesterday.toISOString().split("T")[0];
 
@@ -73,6 +84,10 @@ function cleanupYesterdayFolder(logger) {
     logger.error(`❌ Folder cleanup failed: ${err.message}`);
   }
 }
+
+// -----------------------------
+// SHEET COUNT HELPERS
+// -----------------------------
 function incrementTodaySheetCount() {
   let count = 0;
   if (fs.existsSync(SHEET_COUNT_FILE)) {
@@ -92,18 +107,21 @@ function resetTodaySheetCount() {
   }
 }
 
+// -----------------------------
+// SCRIPT END HELPERS (LA SAFE)
+// -----------------------------
 function isScriptEndedToday() {
   try {
     if (!fs.existsSync(SCRIPT_END_FLAG)) return false;
     const savedDate = fs.readFileSync(SCRIPT_END_FLAG, "utf8").trim();
-    return savedDate === getTodayDateString();
+    return savedDate === getLADateString(); // ✅ LA date
   } catch {
     return false;
   }
 }
 
 function markScriptEndedToday() {
-  fs.writeFileSync(SCRIPT_END_FLAG, getTodayDateString(), "utf8");
+  fs.writeFileSync(SCRIPT_END_FLAG, getLADateString(), "utf8"); // ✅ LA date
 }
 
 // -----------------------------
@@ -114,16 +132,14 @@ const LOGS_DIR = path.join(__dirname, "logs");
 // -----------------------------
 // LOGGER SETUP
 // -----------------------------
-function getTodayDateString() {
-  return new Date().toISOString().split("T")[0]; // YYYY-MM-DD
-}
 
 function createLogger() {
   if (!fs.existsSync(LOGS_DIR)) {
     fs.mkdirSync(LOGS_DIR, { recursive: true });
   }
 
-  const today = getTodayDateString();
+  // ✅ LA-based log date
+  const today = getLADateString();
   const logFilePath = path.join(LOGS_DIR, `${today}.log`);
 
   return winston.createLogger({
@@ -131,17 +147,19 @@ function createLogger() {
     format: winston.format.combine(
       winston.format.timestamp({ format: "YYYY-MM-DD HH:mm:ss" }),
       winston.format.printf(
-        (info) => `${info.timestamp} [${info.level.toUpperCase()}] ${info.message}`
+        (info) =>
+          `${info.timestamp} [${info.level.toUpperCase()}] ${info.message}`
       )
     ),
     transports: [
       new winston.transports.File({ filename: logFilePath }),
-      new winston.transports.Console()
-    ]
+      new winston.transports.Console(),
+    ],
   });
 }
 
-// Time Helpers
+// -----------------------------
+// Time Helpers (NO CHANGE NEEDED)
 // -----------------------------
 
 // "HH:MM:SS" -> seconds
@@ -226,8 +244,6 @@ function setLastRunTime(timestamp) {
   }
 }
 
-
-
 // -----------------------------
 // HTML Email Body
 // -----------------------------
@@ -269,42 +285,63 @@ function generateEmail(agent, date_str) {
 // -----------------------------
 async function mergeAndMail() {
   const logger = createLogger();
-  // 🌙 Daily cleanup (runs safely even if folder not exists)
-cleanupYesterdayFolder(logger);
 
+  // 🌙 Daily cleanup (LA-based)
+  cleanupYesterdayFolder(logger);
 
   logger.info("🚀 mergeAndMail job started");
 
+  // -----------------------------
+  // ⏰ HARD STOP: RUN ONLY 6 AM – 6 PM LA
+  // -----------------------------
+  const laHour = getLAHour();
+
+  if (laHour < 6 || laHour >= 18) {
+    logger.info(`⏭ Outside LA business hours (${laHour}). Skipping run.`);
+    return;
+  }
+
+  // -----------------------------
+  // ⏱️ 10 MIN GAP CHECK
+  // -----------------------------
   const now = Date.now();
   const lastRun = getLastRunTime();
   const diffMinutes = (now - lastRun) / (1000 * 60);
 
   if (lastRun && diffMinutes < 10) {
-    logger.info(`⏭ Skipping run (only ${diffMinutes.toFixed(1)} min passed). Waiting for 10 min gap...`);
+    logger.info(
+      `⏭ Skipping run (only ${diffMinutes.toFixed(
+        1
+      )} min passed). Waiting for 10 min gap...`
+    );
     return;
   }
-// 📧 ADMIN MAIL – SCRIPT STARTED (ONLY ONCE PER DAY)
-if (!isScriptStartedToday()) {
-  await sendEmail(
-    ["jordan@aorborc.com", "vijay@aorborc.com"],
-    `✅ Daily Agent Script Started - ${getTodayDateString()}`,
-    `
-      <p>Hello Team,</p>
-      <p>The daily agent report script has <b>STARTED</b>.</p>
-      <p><b>Start Time:</b> ${new Date().toLocaleString()}</p>
-      <br>
-      <p>— System</p>
-    `
-  );
 
-  markScriptStartedToday();
-}
+  // -----------------------------
+  // 📧 ADMIN MAIL – SCRIPT START (ONCE PER LA DAY)
+  // -----------------------------
+  if (!isScriptStartedToday()) {
+    await sendEmail(
+      ["jordan@aorborc.com", "vijay@aorborc.com"],
+      `✅ Daily Agent Script Started - ${getLADateString()}`,
+      `
+        <p>Hello Team,</p>
+        <p>The daily agent report script has <b>STARTED</b>.</p>
+        <p><b>Start Time:</b> ${getLADate().toLocaleString()}</p>
+        <br>
+        <p>— System</p>
+      `
+    );
+
+    markScriptStartedToday();
+  }
 
   setLastRunTime(now);
 
-  // ✅ STEP 1: Download from AlvinACW server
+  // -----------------------------
+  // 📥 STEP 1: DOWNLOAD FILE
+  // -----------------------------
   const downloadedFilePath = await downloadFromServers();
-
 
   if (!downloadedFilePath) {
     logger.info("⏭ No file downloaded (today file not available). Skipping run.");
@@ -312,20 +349,21 @@ if (!isScriptStartedToday()) {
   }
 
   logger.info(`✅ Downloaded File: ${downloadedFilePath}`);
- 
 
-
-  // ✅ If same file already processed, SKIP sending mail
+  // -----------------------------
+  // ⛔ DUPLICATE FILE CHECK
+  // -----------------------------
   const lastFile = getLastProcessedFile();
-
   if (lastFile && lastFile === downloadedFilePath) {
     logger.info("⏭ No new file found (same as last processed). Skipping email...");
     return;
   }
-  // ✅ Count ONLY when it is a NEW sheet
-incrementTodaySheetCount();
 
-  // ✅ STEP 2: Read that single file
+  incrementTodaySheetCount();
+
+  // -----------------------------
+  // 📊 STEP 2: READ FILE
+  // -----------------------------
   const wb = xlsx.readFile(downloadedFilePath);
   const sheet = wb.Sheets[wb.SheetNames[0]];
   const rows = xlsx.utils.sheet_to_json(sheet, { defval: "" });
@@ -335,7 +373,9 @@ incrementTodaySheetCount();
     return;
   }
 
-  // ✅ STEP 3: Group + Combine duplicate AGENT email rows
+  // -----------------------------
+  // 🔄 STEP 3: MERGE AGENT DATA
+  // -----------------------------
   const map = new Map();
 
   rows.forEach((r) => {
@@ -353,7 +393,6 @@ incrementTodaySheetCount();
         AGENT: email,
         "AGENT FIRST NAME": r["AGENT FIRST NAME"] || "",
         "AGENT LAST NAME": r["AGENT LAST NAME"] || "",
-
         TOTAL_CALLS: 0,
         TOTAL_HANDLE: 0,
         TOTAL_TALK: 0,
@@ -363,125 +402,98 @@ incrementTodaySheetCount();
 
     const a = map.get(email);
 
-    // fill missing names if first row empty
     if (!a["AGENT FIRST NAME"] && r["AGENT FIRST NAME"])
       a["AGENT FIRST NAME"] = r["AGENT FIRST NAME"];
-
     if (!a["AGENT LAST NAME"] && r["AGENT LAST NAME"])
       a["AGENT LAST NAME"] = r["AGENT LAST NAME"];
-
     if (!a["AGENT GROUP"] && r["AGENT GROUP"])
       a["AGENT GROUP"] = r["AGENT GROUP"];
 
-    // add totals (2 rows -> summed)
     a.TOTAL_CALLS += calls;
     a.TOTAL_HANDLE += handleSec;
     a.TOTAL_TALK += talkSec;
     a.TOTAL_ACW += acwSec;
-
-    map.set(email, a);
   });
 
-  // ✅ STEP 4: Create final agent list with recalculated averages
-  const final = Array.from(map.values()).map((a) => {
-    return {
-      "AGENT GROUP": a["AGENT GROUP"],
-      AGENT: a.AGENT,
-      "AGENT FIRST NAME": a["AGENT FIRST NAME"],
-      "AGENT LAST NAME": a["AGENT LAST NAME"],
-
-      "CALLS count": a.TOTAL_CALLS,
-
-      "HANDLE TIME": secondsToTime(a.TOTAL_HANDLE),
-      "Average HANDLE TIME": calcAvg(a.TOTAL_HANDLE, a.TOTAL_CALLS),
-
-      "TALK TIME": secondsToTime(a.TOTAL_TALK),
-      "Average TALK TIME": calcAvg(a.TOTAL_TALK, a.TOTAL_CALLS),
-
-      "AFTER CALL WORK TIME": secondsToTime(a.TOTAL_ACW),
-      "Average AFTER CALL WORK TIME": calcAvg(a.TOTAL_ACW, a.TOTAL_CALLS),
-    };
-  });
+  // -----------------------------
+  // 📈 STEP 4: FINAL AGENT LIST
+  // -----------------------------
+  const final = Array.from(map.values()).map((a) => ({
+    "AGENT GROUP": a["AGENT GROUP"],
+    AGENT: a.AGENT,
+    "AGENT FIRST NAME": a["AGENT FIRST NAME"],
+    "AGENT LAST NAME": a["AGENT LAST NAME"],
+    "CALLS count": a.TOTAL_CALLS,
+    "HANDLE TIME": secondsToTime(a.TOTAL_HANDLE),
+    "Average HANDLE TIME": calcAvg(a.TOTAL_HANDLE, a.TOTAL_CALLS),
+    "TALK TIME": secondsToTime(a.TOTAL_TALK),
+    "Average TALK TIME": calcAvg(a.TOTAL_TALK, a.TOTAL_CALLS),
+    "AFTER CALL WORK TIME": secondsToTime(a.TOTAL_ACW),
+    "Average AFTER CALL WORK TIME": calcAvg(a.TOTAL_ACW, a.TOTAL_CALLS),
+  }));
 
   logger.info(`✅ Total unique agents: ${final.length}`);
 
-  // ✅ STEP 5: Save summary output CSV (optional)
-  const dir = path.join(__dirname, "downloads");
-  const outFile = path.join(dir, "AlvinACW_AgentSummary.csv");
-  const csv = xlsx.utils.sheet_to_csv(xlsx.utils.json_to_sheet(final));
-  fs.writeFileSync(outFile, csv);
-  logger.info(`✅ Summary File Created → ${outFile}`);
+  // -----------------------------
+  // 📧 STEP 5: SEND AGENT EMAILS
+  // -----------------------------
+  if (final.length === 0) {
+    logger.error("❌ No agents to email");
+    return;
+  }
 
- // ✅ STEP 6: Send mail to ALL agents
-if (final.length === 0) {
-  logger.error("❌ No agents to email");
-  return;
-}
-
-  const date = new Date().toISOString().split("T")[0];
+  const date = getLADateString();
 
   let successCount = 0;
   let failCount = 0;
 
- for (let i = 0; i < final.length; i++) {
-  const agent = final[i];
+  for (const agent of final) {
+    if (!agent.AGENT) continue;
 
-  if (!agent.AGENT) {
-    logger.warn("⚠️ Skipping agent without email");
-    continue;
+    try {
+      await sendEmail(
+        agent.AGENT,
+        `Hourly Activity Report - ${date}`,
+        generateEmail(agent, date)
+      );
+      successCount++;
+    } catch (err) {
+      failCount++;
+      logger.error(`❌ Email failed to ${agent.AGENT} | ${err.message}`);
+    }
   }
 
-  const subject = `Hourly Activity Report - ${date}`;
-  const html = generateEmail(agent, date);
+  logger.info(`✅ Email Summary: Success=${successCount}, Failed=${failCount}`);
 
-  try {
-    await sendEmail(agent.AGENT, subject, html);
-    successCount++;
-    logger.info(`📧 Email sent successfully: ${agent.AGENT}`);
-  } catch (err) {
-    failCount++;
-    logger.error(`❌ Email failed to ${agent.AGENT} | ${err.message}`);
+  setLastProcessedFile(downloadedFilePath);
+
+  if (successCount > 0) {
+    deleteDownloadedFile(downloadedFilePath, logger);
   }
-}
 
+  // -----------------------------
+  // 🛑 ADMIN MAIL – SCRIPT ENDED (AFTER 6 PM LA, ONCE)
+  // -----------------------------
+  if (getLAHour() >= 18 && !isScriptEndedToday()) {
+    await sendEmail(
+      ["jordan@aorborc.com", "vijay@aorborc.com"],
+      `🛑 Daily Agent Script Ended - ${getLADateString()}`,
+      `
+        <p>Hello Team,</p>
+        <p>The daily agent report script has <b>ENDED</b>.</p>
+        <p><b>Date:</b> ${getLADateString()}</p>
+        <p><b>Total Sheets Processed Today:</b> ${getTodaySheetCount()}</p>
+        <p><b>End Time:</b> ${getLADate().toLocaleString()}</p>
+        <br>
+        <p>— System</p>
+      `
+    );
 
- logger.info(`✅ Email Summary: Success=${successCount}, Failed=${failCount}`);
+    markScriptEndedToday();
+    resetTodaySheetCount();
+  }
 
-// ✅ Mark file processed
-setLastProcessedFile(downloadedFilePath);
-
-// ✅ DELETE FILE only if at least one mail sent
-if (successCount > 0) {
-  deleteDownloadedFile(downloadedFilePath, logger);
-}
-
-// 📧 ADMIN MAIL – SCRIPT ENDED (ONLY ONCE PER DAY)  ✅ CORRECT PLACE
-const currentHour = new Date().getHours();
-
-if (currentHour >= 18 && !isScriptEndedToday()) {
-  const totalSheets = getTodaySheetCount();
-
- await sendEmail(
-  ["jordan@aorborc.com", "vijay@aorborc.com"],
-  `🛑 Daily Agent Script Ended - ${getTodayDateString()}`,
-  `
-    <p>Hello Team,</p>
-    <p>The daily agent report script has <b>ENDED</b>.</p>
-    <p><b>Date:</b> ${getTodayDateString()}</p>
-    <p><b>Total Sheets Processed Today:</b> ${getTodaySheetCount()}</p>
-    <p><b>End Time:</b> ${new Date().toLocaleString()}</p>
-    <br>
-    <p>— System</p>
-  `
-);
-
-
-  markScriptEndedToday();
-  resetTodaySheetCount();
-}
-
-logger.info("🎉 Completed → Reports sent");
-
+  logger.info("🎉 Completed → Reports sent");
 }
 
 mergeAndMail();
