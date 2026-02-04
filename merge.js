@@ -1,3 +1,9 @@
+const fs = require("fs");
+const path = require("path");
+const winston = require("winston");
+const sendEmail = require("./sendEmail");
+const downloadFromServers = require("./sftpDownload");
+
 // -----------------------------
 // STATE PATHS (MUST COME FIRST)
 // -----------------------------
