@@ -127,7 +127,10 @@ function isScriptEndedToday() {
 }
 
 function markScriptEndedToday() {
-  fs.writeFileSync(SCRIPT_END_FLAG, getLADateString(), "utf8"); // ✅ LA date
+  if (!fs.existsSync(STATE_DIR)) {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+  }
+  fs.writeFileSync(SCRIPT_END_FLAG, getLADateString(), "utf8");
 }
 
 // -----------------------------
@@ -295,18 +298,52 @@ async function mergeAndMail() {
   // 🌙 Daily cleanup (LA-based)
   cleanupYesterdayFolder(logger);
 
-  logger.info("🚀 mergeAndMail job started");
-
-  // -----------------------------
-  // ⏰ HARD STOP: RUN ONLY 6 AM – 6 PM LA
-  // -----------------------------
   const laHour = getLAHour();
 
+  
+
+
+  // -----------------------------
+  // 🛑 DAILY END MAIL (RUNS EVEN AFTER 6 PM)
+  // -----------------------------
+  if (laHour >= 18 && !isScriptEndedToday()) {
+    logger.info(" END condition met, attempting END mail...");
+    try {
+      const sheets = getTodaySheetCount();
+
+      await sendEmail(
+        ["jordan@aorborc.com", "vijay@aorborc.com"],
+        `🛑 Daily Agent Script Ended - ${getLADateString()}`,
+        `
+          <p>Hello Team,</p>
+          <p>The daily agent report script has <b>ENDED</b>.</p>
+          <p><b>Date:</b> ${getLADateString()}</p>
+          <p><b>Total Sheets Processed:</b> ${sheets}</p>
+          <p><b>End Time:</b> ${getLADate().toLocaleString()}</p>
+          <br>
+          <p>— System</p>
+        `
+      );
+
+      logger.info(
+        `🛑 END MAIL SENT | Sheets=${sheets}`
+      );
+
+      markScriptEndedToday();
+      resetTodaySheetCount();
+    } catch (err) {
+      logger.error(`❌ END MAIL FAILED | ${err.message}`);
+    }
+  }
+
+  // -----------------------------
+  // ⏭ HARD STOP (AFTER END CHECK)
+  // -----------------------------
   if (laHour < 6 || laHour >= 18) {
-    logger.info(`⏭ Outside LA business hours (${laHour}). Skipping run.`);
     return;
   }
 
+logger.info("🚀 mergeAndMail run started");
   // -----------------------------
   // ⏱️ 10 MIN GAP CHECK
   // -----------------------------
@@ -316,71 +353,88 @@ async function mergeAndMail() {
 
   if (lastRun && diffMinutes < 10) {
     logger.info(
-      `⏭ Skipping run (only ${diffMinutes.toFixed(
-        1
-      )} min passed). Waiting for 10 min gap...`
+      `⏭ Skipping run (only ${diffMinutes.toFixed(1)} min passed)`
     );
     return;
-  }
-
-  // -----------------------------
-  // 📧 ADMIN MAIL – SCRIPT START (ONCE PER LA DAY)
-  // -----------------------------
-  if (!isScriptStartedToday()) {
-    await sendEmail(
-      ["jordan@aorborc.com", "vijay@aorborc.com"],
-      `✅ Daily Agent Script Started - ${getLADateString()}`,
-      `
-        <p>Hello Team,</p>
-        <p>The daily agent report script has <b>STARTED</b>.</p>
-        <p><b>Start Time:</b> ${getLADate().toLocaleString()}</p>
-        <br>
-        <p>— System</p>
-      `
-    );
-
-    markScriptStartedToday();
   }
 
   setLastRunTime(now);
 
   // -----------------------------
-  // 📥 STEP 1: DOWNLOAD FILE
+  // 📧 START MAIL (ONCE PER LA DAY)
   // -----------------------------
-  const downloadedFilePath = await downloadFromServers();
+  if (!isScriptStartedToday()) {
+    resetTodaySheetCount();
 
-  if (!downloadedFilePath) {
-    logger.info("⏭ No file downloaded (today file not available). Skipping run.");
+    try {
+      await sendEmail(
+        ["jordan@aorborc.com", "vijay@aorborc.com"],
+        `✅ Daily Agent Script Started - ${getLADateString()}`,
+        `
+          <p>Hello Team,</p>
+          <p>The daily agent report script has <b>STARTED</b>.</p>
+          <p><b>Start Time:</b> ${getLADate().toLocaleString()}</p>
+          <br>
+          <p>— System</p>
+        `
+      );
+
+      logger.info("✅ START MAIL SENT");
+      markScriptStartedToday();
+    } catch (err) {
+      logger.error(`❌ START MAIL FAILED | ${err.message}`);
+    }
+  }
+
+  // -----------------------------
+  // 📥 DOWNLOAD FILE
+  // -----------------------------
+  let downloadedFilePath;
+  try {
+    downloadedFilePath = await downloadFromServers();
+  } catch (err) {
+    logger.error(`❌ DOWNLOAD FAILED | ${err.message}`);
     return;
   }
 
-  logger.info(`✅ Downloaded File: ${downloadedFilePath}`);
+  if (!downloadedFilePath) {
+    logger.info("⏭ No file available yet");
+    return;
+  }
+
+  logger.info(`📥 File downloaded: ${downloadedFilePath}`);
 
   // -----------------------------
-  // ⛔ DUPLICATE FILE CHECK
+  // ⛔ DUPLICATE CHECK
   // -----------------------------
   const lastFile = getLastProcessedFile();
-  if (lastFile && lastFile === downloadedFilePath) {
-    logger.info("⏭ No new file found (same as last processed). Skipping email...");
+  if (lastFile === downloadedFilePath) {
+    logger.info("⏭ Same file already processed");
     return;
   }
 
   incrementTodaySheetCount();
 
   // -----------------------------
-  // 📊 STEP 2: READ FILE
+  // 📊 READ SHEET
   // -----------------------------
-  const wb = xlsx.readFile(downloadedFilePath);
-  const sheet = wb.Sheets[wb.SheetNames[0]];
-  const rows = xlsx.utils.sheet_to_json(sheet, { defval: "" });
+  let rows;
+  try {
+    const wb = xlsx.readFile(downloadedFilePath);
+    const sheet = wb.Sheets[wb.SheetNames[0]];
+    rows = xlsx.utils.sheet_to_json(sheet, { defval: "" });
+  } catch (err) {
+    logger.error(`❌ EXCEL READ FAILED | ${err.message}`);
+    return;
+  }
 
   if (!rows.length) {
-    logger.error("❌ No data rows found in sheet");
+    logger.error("❌ Sheet has no rows");
     return;
   }
 
   // -----------------------------
-  // 🔄 STEP 3: MERGE AGENT DATA
+  // 🔄 MERGE AGENTS
   // -----------------------------
   const map = new Map();
 
@@ -389,87 +443,70 @@ async function mergeAndMail() {
     if (!email) return;
 
     const calls = Number(r["CALLS count"] || 0);
-    const handleSec = timeToSeconds(r["HANDLE TIME"]);
-    const talkSec = timeToSeconds(r["TALK TIME"]);
-    const acwSec = timeToSeconds(r["AFTER CALL WORK TIME"]);
+
+    const handle = timeToSeconds(r["HANDLE TIME"]);
+    const talk = timeToSeconds(r["TALK TIME"]);
+    const acw = timeToSeconds(r["AFTER CALL WORK TIME"]);
 
     if (!map.has(email)) {
       map.set(email, {
-        "AGENT GROUP": r["AGENT GROUP"] || "",
         AGENT: email,
-        "AGENT FIRST NAME": r["AGENT FIRST NAME"] || "",
-        "AGENT LAST NAME": r["AGENT LAST NAME"] || "",
-        TOTAL_CALLS: 0,
-        TOTAL_HANDLE: 0,
-        TOTAL_TALK: 0,
-        TOTAL_ACW: 0,
+        FIRST: r["AGENT FIRST NAME"] || "",
+        LAST: r["AGENT LAST NAME"] || "",
+        GROUP: r["AGENT GROUP"] || "",
+        CALLS: 0,
+        HANDLE: 0,
+        TALK: 0,
+        ACW: 0,
       });
     }
 
     const a = map.get(email);
-
-    if (!a["AGENT FIRST NAME"] && r["AGENT FIRST NAME"])
-      a["AGENT FIRST NAME"] = r["AGENT FIRST NAME"];
-    if (!a["AGENT LAST NAME"] && r["AGENT LAST NAME"])
-      a["AGENT LAST NAME"] = r["AGENT LAST NAME"];
-    if (!a["AGENT GROUP"] && r["AGENT GROUP"])
-      a["AGENT GROUP"] = r["AGENT GROUP"];
-
-    a.TOTAL_CALLS += calls;
-    a.TOTAL_HANDLE += handleSec;
-    a.TOTAL_TALK += talkSec;
-    a.TOTAL_ACW += acwSec;
+    a.CALLS += calls;
+    a.HANDLE += handle;
+    a.TALK += talk;
+    a.ACW += acw;
   });
 
-  // -----------------------------
-  // 📈 STEP 4: FINAL AGENT LIST
-  // -----------------------------
   const final = Array.from(map.values()).map((a) => ({
-    "AGENT GROUP": a["AGENT GROUP"],
     AGENT: a.AGENT,
-    "AGENT FIRST NAME": a["AGENT FIRST NAME"],
-    "AGENT LAST NAME": a["AGENT LAST NAME"],
-    "CALLS count": a.TOTAL_CALLS,
-    "HANDLE TIME": secondsToTime(a.TOTAL_HANDLE),
-    "Average HANDLE TIME": calcAvg(a.TOTAL_HANDLE, a.TOTAL_CALLS),
-    "TALK TIME": secondsToTime(a.TOTAL_TALK),
-    "Average TALK TIME": calcAvg(a.TOTAL_TALK, a.TOTAL_CALLS),
-    "AFTER CALL WORK TIME": secondsToTime(a.TOTAL_ACW),
-    "Average AFTER CALL WORK TIME": calcAvg(a.TOTAL_ACW, a.TOTAL_CALLS),
+    "AGENT FIRST NAME": a.FIRST,
+    "AGENT LAST NAME": a.LAST,
+    "AGENT GROUP": a.GROUP,
+    "CALLS count": a.CALLS,
+    "HANDLE TIME": secondsToTime(a.HANDLE),
+    "Average HANDLE TIME": calcAvg(a.HANDLE, a.CALLS),
+    "TALK TIME": secondsToTime(a.TALK),
+    "Average TALK TIME": calcAvg(a.TALK, a.CALLS),
+    "AFTER CALL WORK TIME": secondsToTime(a.ACW),
+    "Average AFTER CALL WORK TIME": calcAvg(a.ACW, a.CALLS),
   }));
 
-  logger.info(`✅ Total unique agents: ${final.length}`);
+  logger.info(`📊 Agents prepared: ${final.length}`);
 
   // -----------------------------
-  // 📧 STEP 5: SEND AGENT EMAILS
+  // 📧 SEND AGENT MAILS
   // -----------------------------
-  if (final.length === 0) {
-    logger.error("❌ No agents to email");
-    return;
-  }
-
-  const date = getLADateString();
-
   let successCount = 0;
   let failCount = 0;
 
   for (const agent of final) {
-    if (!agent.AGENT) continue;
-
     try {
       await sendEmail(
         agent.AGENT,
-        `Hourly Activity Report - ${date}`,
-        generateEmail(agent, date)
+        `Hourly Activity Report - ${getLADateString()}`,
+        generateEmail(agent, getLADateString())
       );
       successCount++;
     } catch (err) {
       failCount++;
-      logger.error(`❌ Email failed to ${agent.AGENT} | ${err.message}`);
+      logger.error(`❌ MAIL FAIL | ${agent.AGENT} | ${err.message}`);
     }
   }
 
-  logger.info(`✅ Email Summary: Success=${successCount}, Failed=${failCount}`);
+  logger.info(
+    `📨 MAIL SUMMARY | Success=${successCount} | Failed=${failCount}`
+  );
 
   setLastProcessedFile(downloadedFilePath);
 
@@ -477,29 +514,7 @@ async function mergeAndMail() {
     deleteDownloadedFile(downloadedFilePath, logger);
   }
 
-  // -----------------------------
-  // 🛑 ADMIN MAIL – SCRIPT ENDED (AFTER 6 PM LA, ONCE)
-  // -----------------------------
-  if (getLAHour() >= 18 && !isScriptEndedToday()) {
-    await sendEmail(
-      ["jordan@aorborc.com", "vijay@aorborc.com"],
-      `🛑 Daily Agent Script Ended - ${getLADateString()}`,
-      `
-        <p>Hello Team,</p>
-        <p>The daily agent report script has <b>ENDED</b>.</p>
-        <p><b>Date:</b> ${getLADateString()}</p>
-        <p><b>Total Sheets Processed Today:</b> ${getTodaySheetCount()}</p>
-        <p><b>End Time:</b> ${getLADate().toLocaleString()}</p>
-        <br>
-        <p>— System</p>
-      `
-    );
-
-    markScriptEndedToday();
-    resetTodaySheetCount();
-  }
-
-  logger.info("🎉 Completed → Reports sent");
+  logger.info("🎉 RUN COMPLETED SUCCESSFULLY");
 }
 
 mergeAndMail();
