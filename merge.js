@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const winston = require("winston");
+const xlsx = require("xlsx"); 
 const sendEmail = require("./sendEmail");
 const downloadFromServers = require("./sftpDownload");
 
@@ -18,6 +19,10 @@ const SCRIPT_END_FLAG = path.join(STATE_DIR, "scriptEnded.txt");
 // ✅ Sheet count file
 const SHEET_COUNT_FILE = path.join(STATE_DIR, "todaySheetCount.txt");
 
+
+// ✅ LOCK FILE (ADD THIS LINE HERE 👇)
+const LOCK_FILE = path.join(STATE_DIR, "script.lock");
+
 // -----------------------------
 // LOS ANGELES TIME HELPERS
 // -----------------------------
@@ -30,7 +35,11 @@ function getLADate() {
 }
 
 function getLADateString() {
-  return getLADate().toISOString().split("T")[0]; // YYYY-MM-DD (LA)
+  const d = getLADate();
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function getLAHour() {
@@ -133,6 +142,23 @@ function markScriptEndedToday() {
   fs.writeFileSync(SCRIPT_END_FLAG, getLADateString(), "utf8");
 }
 
+function acquireLock() {
+  try {
+    if (!fs.existsSync(STATE_DIR)) {
+      fs.mkdirSync(STATE_DIR, { recursive: true });
+    }
+    fs.writeFileSync(LOCK_FILE, process.pid.toString(), { flag: "wx" });
+    return true;
+  } catch {
+    return false; // another instance already running
+  }
+}
+
+function releaseLock() {
+  if (fs.existsSync(LOCK_FILE)) {
+    fs.unlinkSync(LOCK_FILE);
+  }
+}
 // -----------------------------
 // LOGS
 // -----------------------------
@@ -294,7 +320,10 @@ function generateEmail(agent, date_str) {
 // -----------------------------
 async function mergeAndMail() {
   const logger = createLogger();
-
+  if (!acquireLock()) {
+    return; // another instance running, exit silently
+  }
+try{
   // 🌙 Daily cleanup (LA-based)
   cleanupYesterdayFolder(logger);
 
@@ -413,8 +442,7 @@ logger.info("🚀 mergeAndMail run started");
     return;
   }
 
-  incrementTodaySheetCount();
-
+ 
   // -----------------------------
   // 📊 READ SHEET
   // -----------------------------
@@ -507,6 +535,10 @@ logger.info("🚀 mergeAndMail run started");
   logger.info(
     `📨 MAIL SUMMARY | Success=${successCount} | Failed=${failCount}`
   );
+  // ✅ Increment sheet count ONLY if mails actually went out
+if (successCount > 0) {
+  incrementTodaySheetCount();
+}
 
   setLastProcessedFile(downloadedFilePath);
 
@@ -514,7 +546,17 @@ logger.info("🚀 mergeAndMail run started");
     deleteDownloadedFile(downloadedFilePath, logger);
   }
 
-  logger.info("🎉 RUN COMPLETED SUCCESSFULLY");
+logger.info("🎉 RUN COMPLETED SUCCESSFULLY");
+} 
+ catch (err) {
+    // 🔥 catches ANY unexpected error
+    logger.error(`🔥 UNHANDLED ERROR | ${err.message}`);
+  } finally {
+    // 🔓 ALWAYS runs
+    releaseLock();
+  }
 }
+
+
 
 mergeAndMail();
