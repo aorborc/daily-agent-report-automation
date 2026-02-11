@@ -5,22 +5,35 @@ const SftpClient = require("ssh2-sftp-client");
 const winston = require("winston");
 
 // -----------------------------
-// Date Helpers
+// LOS ANGELES TIME HELPERS
+// -----------------------------
+function getLADate() {
+  return new Date(
+    new Date().toLocaleString("en-US", {
+      timeZone: "America/Los_Angeles",
+    })
+  );
+}
+
+// -----------------------------
+// Date Helpers (LA Based)
 // -----------------------------
 function getTodayDateString() {
-  // YYYY-MM-DD
-  const d = new Date();
-  return d.toISOString().split("T")[0];
+  const d = getLADate();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
 }
 
 // 👉 Match Five9 format: YYYY_MM-DD
 function todayFive9Pattern() {
-  const d = new Date();
+  const d = getLADate();
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
 
-  return `${y}_${m}-${day}`; // 2026_01-22
+  return `${y}_${m}-${day}`; // 2026_02-10
 }
 
 // -----------------------------
@@ -30,7 +43,7 @@ const BASE_DOWNLOAD_DIR = path.join(__dirname, "downloads");
 const BASE_LOG_DIR = path.join(__dirname, "logs");
 
 // -----------------------------
-// ✅ Winston Logger (date-wise log file)
+// ✅ Winston Logger (LA date-wise log file)
 // -----------------------------
 function createLogger() {
   if (!fs.existsSync(BASE_LOG_DIR)) {
@@ -68,7 +81,7 @@ const server = {
 async function downloadFromServer() {
   const logger = createLogger();
 
-  // ✅ Create today's download folder
+  // ✅ Create today's LA-based download folder
   const todayDate = getTodayDateString();
   const DOWNLOAD_DIR = path.join(BASE_DOWNLOAD_DIR, todayDate);
 
@@ -104,17 +117,16 @@ async function downloadFromServer() {
         .join(", ")}`
     );
 
-    // 1️⃣ Try today's file
-    let selected = csvFiles.find((f) => f.name.includes(todayPattern));
+    // 1️⃣ Only pick today's 7PM file (_19_00)
+    let selected = csvFiles.find(
+      (f) =>
+        f.name.includes(todayPattern) &&
+        f.name.includes("_19_00")
+    );
 
-    // 2️⃣ ✅ STRICT MODE: today file must exist
+    // 2️⃣ STRICT MODE: 7PM file must exist
     if (!selected) {
-      logger.info(`⏭ Today file not found yet. Skipping for now...`);
-      return null;
-    }
-
-    if (!selected) {
-      logger.info(`❌ No CSV/XLSX files found in ${server.folder}`);
+      logger.info(`⏭ 7PM file not found yet. Skipping for now...`);
       return null;
     }
 

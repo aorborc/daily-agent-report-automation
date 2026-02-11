@@ -83,10 +83,15 @@ function deleteDownloadedFile(filePath, logger) {
 function cleanupYesterdayFolder(logger) {
   const BASE_DOWNLOAD_DIR = path.join(__dirname, "downloads");
 
-  // ✅ LA-based yesterday
-  const yesterday = getLADate();
-  yesterday.setDate(yesterday.getDate() - 1);
-  const dateStr = yesterday.toISOString().split("T")[0];
+ // ✅ LA-based yesterday
+const yesterday = getLADate();
+yesterday.setDate(yesterday.getDate() - 1);
+
+const year = yesterday.getFullYear();
+const month = String(yesterday.getMonth() + 1).padStart(2, "0");
+const day = String(yesterday.getDate()).padStart(2, "0");
+const dateStr = `${year}-${month}-${day}`;
+
 
   const folderPath = path.join(BASE_DOWNLOAD_DIR, dateStr);
 
@@ -323,71 +328,26 @@ async function mergeAndMail() {
   if (!acquireLock()) {
     return; // another instance running, exit silently
   }
-try{
+try {
   // 🌙 Daily cleanup (LA-based)
   cleanupYesterdayFolder(logger);
 
-  const laHour = getLAHour();
-
-  
-
-
-  // -----------------------------
-  // 🛑 DAILY END MAIL (RUNS EVEN AFTER 6 PM)
-  // -----------------------------
-  if (laHour >= 18 && !isScriptEndedToday()) {
-    logger.info(" END condition met, attempting END mail...");
-    try {
-      const sheets = getTodaySheetCount();
-
-      await sendEmail(
-        ["jordan@aorborc.com", "vijay@aorborc.com"],
-        `🛑 Daily Agent Script Ended - ${getLADateString()}`,
-        `
-          <p>Hello Team,</p>
-          <p>The daily agent report script has <b>ENDED</b>.</p>
-          <p><b>Date:</b> ${getLADateString()}</p>
-          <p><b>Total Sheets Processed:</b> ${sheets}</p>
-          <p><b>End Time:</b> ${getLADate().toLocaleString()}</p>
-          <br>
-          <p>— System</p>
-        `
-      );
-
-      logger.info(
-        `🛑 END MAIL SENT | Sheets=${sheets}`
-      );
-
-      markScriptEndedToday();
-      resetTodaySheetCount();
-    } catch (err) {
-      logger.error(`❌ END MAIL FAILED | ${err.message}`);
-    }
-  }
+  const laNow = getLADate();
+  const laHour = laNow.getHours();
+  const laMinute = laNow.getMinutes();
 
   // -----------------------------
-  // ⏭ HARD STOP (AFTER END CHECK)
+  // ⏭ ALLOW ONLY BETWEEN 6:30PM – 8:00PM LA
   // -----------------------------
-  if (laHour < 6 || laHour >= 18) {
+  if (
+    laHour < 18 ||
+    laHour > 20 ||
+    (laHour === 18 && laMinute < 30) ||
+    (laHour === 20 && laMinute > 0)
+  ) {
+    logger.info("⏳ Outside allowed time window (6:30PM–8PM LA)");
     return;
   }
-
-logger.info("🚀 mergeAndMail run started");
-  // -----------------------------
-  // ⏱️ 10 MIN GAP CHECK
-  // -----------------------------
-  const now = Date.now();
-  const lastRun = getLastRunTime();
-  const diffMinutes = (now - lastRun) / (1000 * 60);
-
-  if (lastRun && diffMinutes < 10) {
-    logger.info(
-      `⏭ Skipping run (only ${diffMinutes.toFixed(1)} min passed)`
-    );
-    return;
-  }
-
-  setLastRunTime(now);
 
   // -----------------------------
   // 📧 START MAIL (ONCE PER LA DAY)
@@ -414,6 +374,16 @@ logger.info("🚀 mergeAndMail run started");
       logger.error(`❌ START MAIL FAILED | ${err.message}`);
     }
   }
+
+  // -----------------------------
+  // ⏳ PROCESS ONLY DURING 7PM HOUR
+  // -----------------------------
+  if (laHour !== 19) {
+    logger.info("⏳ Waiting for 7PM LA hour...");
+    return;
+  }
+
+  logger.info("🚀 mergeAndMail run started (7PM window)");
 
   // -----------------------------
   // 📥 DOWNLOAD FILE
@@ -532,13 +502,14 @@ logger.info("🚀 mergeAndMail run started");
     }
   }
 
-  logger.info(
+   logger.info(
     `📨 MAIL SUMMARY | Success=${successCount} | Failed=${failCount}`
   );
+
   // ✅ Increment sheet count ONLY if mails actually went out
-if (successCount > 0) {
-  incrementTodaySheetCount();
-}
+  if (successCount > 0) {
+    incrementTodaySheetCount();
+  }
 
   setLastProcessedFile(downloadedFilePath);
 
@@ -546,17 +517,46 @@ if (successCount > 0) {
     deleteDownloadedFile(downloadedFilePath, logger);
   }
 
-logger.info("🎉 RUN COMPLETED SUCCESSFULLY");
-} 
- catch (err) {
-    // 🔥 catches ANY unexpected error
-    logger.error(`🔥 UNHANDLED ERROR | ${err.message}`);
-  } finally {
-    // 🔓 ALWAYS runs
-    releaseLock();
-  }
+  logger.info("🎉 RUN COMPLETED SUCCESSFULLY");
+
+  if (successCount !== final.length) {
+  logger.warn("⚠ Not all agent mails sent. END mail skipped.");
 }
+ if (
+  final.length > 0 &&
+  successCount === final.length &&
+  !isScriptEndedToday()
+)
+ {
+    try {
+      const sheets = getTodaySheetCount();
 
+      await sendEmail(
+        ["jordan@aorborc.com", "vijay@aorborc.com"],
+        `🛑 Daily Agent Script Ended - ${getLADateString()}`,
+        `
+          <p>Hello Team,</p>
+          <p>The daily agent report script has <b>ENDED</b>.</p>
+          <p><b>Date:</b> ${getLADateString()}</p>
+          <p><b>Total Sheets Processed:</b> ${sheets}</p>
+          <p><b>End Time:</b> ${getLADate().toLocaleString()}</p>
+          <br>
+          <p>— System</p>
+        `
+      );
 
+      logger.info("🛑 END MAIL SENT");
+      markScriptEndedToday();
+      resetTodaySheetCount();
+    } catch (err) {
+      logger.error(`❌ END MAIL FAILED | ${err.message}`);
+    }
+  }
 
+} catch (err) {
+  logger.error(`🔥 UNHANDLED ERROR | ${err.message}`);
+} finally {
+  releaseLock();
+}
+}
 mergeAndMail();
