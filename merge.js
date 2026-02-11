@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const winston = require("winston");
-const xlsx = require("xlsx"); 
+const xlsx = require("xlsx");
 const sendEmail = require("./sendEmail");
 const downloadFromServers = require("./sftpDownload");
 
@@ -22,6 +22,7 @@ const SHEET_COUNT_FILE = path.join(STATE_DIR, "todaySheetCount.txt");
 
 // ✅ LOCK FILE (ADD THIS LINE HERE 👇)
 const LOCK_FILE = path.join(STATE_DIR, "script.lock");
+const EMAIL_DELAY_MS = 700;
 
 // -----------------------------
 // LOS ANGELES TIME HELPERS
@@ -44,6 +45,19 @@ function getLADateString() {
 
 function getLAHour() {
   return getLADate().getHours(); // 0–23 (LA)
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatEmailError(err) {
+  if (!err) return "Unknown error";
+  const parts = [];
+  if (err.statusCode) parts.push(`statusCode=${err.statusCode}`);
+  if (err.name) parts.push(`name=${err.name}`);
+  if (err.message) parts.push(`message=${err.message}`);
+  return parts.length ? parts.join(" | ") : String(err);
 }
 
 // -----------------------------
@@ -83,14 +97,14 @@ function deleteDownloadedFile(filePath, logger) {
 function cleanupYesterdayFolder(logger) {
   const BASE_DOWNLOAD_DIR = path.join(__dirname, "downloads");
 
- // ✅ LA-based yesterday
-const yesterday = getLADate();
-yesterday.setDate(yesterday.getDate() - 1);
+  // ✅ LA-based yesterday
+  const yesterday = getLADate();
+  yesterday.setDate(yesterday.getDate() - 1);
 
-const year = yesterday.getFullYear();
-const month = String(yesterday.getMonth() + 1).padStart(2, "0");
-const day = String(yesterday.getDate()).padStart(2, "0");
-const dateStr = `${year}-${month}-${day}`;
+  const year = yesterday.getFullYear();
+  const month = String(yesterday.getMonth() + 1).padStart(2, "0");
+  const day = String(yesterday.getDate()).padStart(2, "0");
+  const dateStr = `${year}-${month}-${day}`;
 
 
   const folderPath = path.join(BASE_DOWNLOAD_DIR, dateStr);
@@ -288,9 +302,8 @@ function setLastRunTime(timestamp) {
 // HTML Email Body
 // -----------------------------
 function generateEmail(agent, date_str) {
-  const fullName = `${agent["AGENT FIRST NAME"] || ""} ${
-    agent["AGENT LAST NAME"] || ""
-  }`.trim();
+  const fullName = `${agent["AGENT FIRST NAME"] || ""} ${agent["AGENT LAST NAME"] || ""
+    }`.trim();
 
   const displayName = fullName || agent.AGENT || "Agent";
 
@@ -328,213 +341,217 @@ async function mergeAndMail() {
   if (!acquireLock()) {
     return; // another instance running, exit silently
   }
-try {
-  // 🌙 Daily cleanup (LA-based)
-  cleanupYesterdayFolder(logger);
+  try {
+    // 🌙 Daily cleanup (LA-based)
+    cleanupYesterdayFolder(logger);
 
-  const laNow = getLADate();
-  const laHour = laNow.getHours();
-  const laMinute = laNow.getMinutes();
+    const laNow = getLADate();
+    const laHour = laNow.getHours();
+    const laMinute = laNow.getMinutes();
 
-  // -----------------------------
-  // ⏭ ALLOW ONLY BETWEEN 6:30PM – 8:00PM LA
-  // -----------------------------
-  if (
-    laHour < 18 ||
-    laHour > 20 ||
-    (laHour === 18 && laMinute < 30) ||
-    (laHour === 20 && laMinute > 0)
-  ) {
-    logger.info("⏳ Outside allowed time window (6:30PM–8PM LA)");
-    return;
-  }
+    // -----------------------------
+    // ⏭ ALLOW ONLY BETWEEN 6:30PM – 8:00PM LA
+    // -----------------------------
+    if (
+      laHour < 18 ||
+      laHour > 20 ||
+      (laHour === 18 && laMinute < 30) ||
+      (laHour === 20 && laMinute > 0)
+    ) {
+      logger.info("⏳ Outside allowed time window (6:30PM–8PM LA)");
+      return;
+    }
 
-  // -----------------------------
-  // 📧 START MAIL (ONCE PER LA DAY)
-  // -----------------------------
-  if (!isScriptStartedToday()) {
-    resetTodaySheetCount();
+    // -----------------------------
+    // 📧 START MAIL (ONCE PER LA DAY)
+    // -----------------------------
+    if (!isScriptStartedToday()) {
+      resetTodaySheetCount();
 
-    try {
-      await sendEmail(
-        ["jordan@aorborc.com", "vijay@aorborc.com"],
-        `✅ Daily Agent Script Started - ${getLADateString()}`,
-        `
+      try {
+        await sendEmail(
+          ["jordan@aorborc.com", "vijay@aorborc.com"],
+          `✅ Daily Agent Script Started - ${getLADateString()}`,
+          `
           <p>Hello Team,</p>
           <p>The daily agent report script has <b>STARTED</b>.</p>
           <p><b>Start Time:</b> ${getLADate().toLocaleString()}</p>
           <br>
           <p>— System</p>
-        `
-      );
+        `,
+          logger
+        );
 
-      logger.info("✅ START MAIL SENT");
-      markScriptStartedToday();
-    } catch (err) {
-      logger.error(`❌ START MAIL FAILED | ${err.message}`);
-    }
-  }
-
-  // -----------------------------
-  // ⏳ PROCESS ONLY DURING 7PM HOUR
-  // -----------------------------
-  if (laHour !== 19) {
-    logger.info("⏳ Waiting for 7PM LA hour...");
-    return;
-  }
-
-  logger.info("🚀 mergeAndMail run started (7PM window)");
-
-  // -----------------------------
-  // 📥 DOWNLOAD FILE
-  // -----------------------------
-  let downloadedFilePath;
-  try {
-    downloadedFilePath = await downloadFromServers();
-  } catch (err) {
-    logger.error(`❌ DOWNLOAD FAILED | ${err.message}`);
-    return;
-  }
-
-  if (!downloadedFilePath) {
-    logger.info("⏭ No file available yet");
-    return;
-  }
-
-  logger.info(`📥 File downloaded: ${downloadedFilePath}`);
-
-  // -----------------------------
-  // ⛔ DUPLICATE CHECK
-  // -----------------------------
-  const lastFile = getLastProcessedFile();
-  if (lastFile === downloadedFilePath) {
-    logger.info("⏭ Same file already processed");
-    return;
-  }
-
- 
-  // -----------------------------
-  // 📊 READ SHEET
-  // -----------------------------
-  let rows;
-  try {
-    const wb = xlsx.readFile(downloadedFilePath);
-    const sheet = wb.Sheets[wb.SheetNames[0]];
-    rows = xlsx.utils.sheet_to_json(sheet, { defval: "" });
-  } catch (err) {
-    logger.error(`❌ EXCEL READ FAILED | ${err.message}`);
-    return;
-  }
-
-  if (!rows.length) {
-    logger.error("❌ Sheet has no rows");
-    return;
-  }
-
-  // -----------------------------
-  // 🔄 MERGE AGENTS
-  // -----------------------------
-  const map = new Map();
-
-  rows.forEach((r) => {
-    const email = (r["AGENT"] || "").toString().trim();
-    if (!email) return;
-
-    const calls = Number(r["CALLS count"] || 0);
-
-    const handle = timeToSeconds(r["HANDLE TIME"]);
-    const talk = timeToSeconds(r["TALK TIME"]);
-    const acw = timeToSeconds(r["AFTER CALL WORK TIME"]);
-
-    if (!map.has(email)) {
-      map.set(email, {
-        AGENT: email,
-        FIRST: r["AGENT FIRST NAME"] || "",
-        LAST: r["AGENT LAST NAME"] || "",
-        GROUP: r["AGENT GROUP"] || "",
-        CALLS: 0,
-        HANDLE: 0,
-        TALK: 0,
-        ACW: 0,
-      });
+        logger.info("✅ START MAIL SENT");
+        markScriptStartedToday();
+      } catch (err) {
+        logger.error(`❌ START MAIL FAILED | ${formatEmailError(err)}`);
+      }
     }
 
-    const a = map.get(email);
-    a.CALLS += calls;
-    a.HANDLE += handle;
-    a.TALK += talk;
-    a.ACW += acw;
-  });
+    // -----------------------------
+    // ⏳ PROCESS ONLY DURING 7PM HOUR
+    // -----------------------------
+    if (laHour !== 19) {
+      logger.info("⏳ Waiting for 7PM LA hour...");
+      return;
+    }
 
-  const final = Array.from(map.values()).map((a) => ({
-    AGENT: a.AGENT,
-    "AGENT FIRST NAME": a.FIRST,
-    "AGENT LAST NAME": a.LAST,
-    "AGENT GROUP": a.GROUP,
-    "CALLS count": a.CALLS,
-    "HANDLE TIME": secondsToTime(a.HANDLE),
-    "Average HANDLE TIME": calcAvg(a.HANDLE, a.CALLS),
-    "TALK TIME": secondsToTime(a.TALK),
-    "Average TALK TIME": calcAvg(a.TALK, a.CALLS),
-    "AFTER CALL WORK TIME": secondsToTime(a.ACW),
-    "Average AFTER CALL WORK TIME": calcAvg(a.ACW, a.CALLS),
-  }));
+    logger.info("🚀 mergeAndMail run started (7PM window)");
 
-  logger.info(`📊 Agents prepared: ${final.length}`);
-
-  // -----------------------------
-  // 📧 SEND AGENT MAILS
-  // -----------------------------
-  let successCount = 0;
-  let failCount = 0;
-
-  for (const agent of final) {
+    // -----------------------------
+    // 📥 DOWNLOAD FILE
+    // -----------------------------
+    let downloadedFilePath;
     try {
-      await sendEmail(
-        agent.AGENT,
-        `Hourly Activity Report - ${getLADateString()}`,
-        generateEmail(agent, getLADateString())
-      );
-      successCount++;
+      downloadedFilePath = await downloadFromServers();
     } catch (err) {
-      failCount++;
-      logger.error(`❌ MAIL FAIL | ${agent.AGENT} | ${err.message}`);
+      logger.error(`❌ DOWNLOAD FAILED | ${err.message}`);
+      return;
     }
-  }
 
-   logger.info(
-    `📨 MAIL SUMMARY | Success=${successCount} | Failed=${failCount}`
-  );
+    if (!downloadedFilePath) {
+      logger.info("⏭ No file available yet");
+      return;
+    }
 
-  // ✅ Increment sheet count ONLY if mails actually went out
-  if (successCount > 0) {
-    incrementTodaySheetCount();
-  }
+    logger.info(`📥 File downloaded: ${downloadedFilePath}`);
 
-  setLastProcessedFile(downloadedFilePath);
+    // -----------------------------
+    // ⛔ DUPLICATE CHECK
+    // -----------------------------
+    const lastFile = getLastProcessedFile();
+    if (lastFile === downloadedFilePath) {
+      logger.info("⏭ Same file already processed");
+      return;
+    }
 
-  if (successCount > 0) {
-    deleteDownloadedFile(downloadedFilePath, logger);
-  }
 
-  logger.info("🎉 RUN COMPLETED SUCCESSFULLY");
-
-  if (successCount !== final.length) {
-  logger.warn("⚠ Not all agent mails sent. END mail skipped.");
-}
- if (
-  final.length > 0 &&
-  successCount === final.length &&
-  !isScriptEndedToday()
-)
- {
+    // -----------------------------
+    // 📊 READ SHEET
+    // -----------------------------
+    let rows;
     try {
-      const sheets = getTodaySheetCount();
+      const wb = xlsx.readFile(downloadedFilePath);
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      rows = xlsx.utils.sheet_to_json(sheet, { defval: "" });
+    } catch (err) {
+      logger.error(`❌ EXCEL READ FAILED | ${err.message}`);
+      return;
+    }
 
-      await sendEmail(
-        ["jordan@aorborc.com", "vijay@aorborc.com"],
-        `🛑 Daily Agent Script Ended - ${getLADateString()}`,
-        `
+    if (!rows.length) {
+      logger.error("❌ Sheet has no rows");
+      return;
+    }
+
+    // -----------------------------
+    // 🔄 MERGE AGENTS
+    // -----------------------------
+    const map = new Map();
+
+    rows.forEach((r) => {
+      const email = (r["AGENT"] || "").toString().trim();
+      if (!email) return;
+
+      const calls = Number(r["CALLS count"] || 0);
+
+      const handle = timeToSeconds(r["HANDLE TIME"]);
+      const talk = timeToSeconds(r["TALK TIME"]);
+      const acw = timeToSeconds(r["AFTER CALL WORK TIME"]);
+
+      if (!map.has(email)) {
+        map.set(email, {
+          AGENT: email,
+          FIRST: r["AGENT FIRST NAME"] || "",
+          LAST: r["AGENT LAST NAME"] || "",
+          GROUP: r["AGENT GROUP"] || "",
+          CALLS: 0,
+          HANDLE: 0,
+          TALK: 0,
+          ACW: 0,
+        });
+      }
+
+      const a = map.get(email);
+      a.CALLS += calls;
+      a.HANDLE += handle;
+      a.TALK += talk;
+      a.ACW += acw;
+    });
+
+    const final = Array.from(map.values()).map((a) => ({
+      AGENT: a.AGENT,
+      "AGENT FIRST NAME": a.FIRST,
+      "AGENT LAST NAME": a.LAST,
+      "AGENT GROUP": a.GROUP,
+      "CALLS count": a.CALLS,
+      "HANDLE TIME": secondsToTime(a.HANDLE),
+      "Average HANDLE TIME": calcAvg(a.HANDLE, a.CALLS),
+      "TALK TIME": secondsToTime(a.TALK),
+      "Average TALK TIME": calcAvg(a.TALK, a.CALLS),
+      "AFTER CALL WORK TIME": secondsToTime(a.ACW),
+      "Average AFTER CALL WORK TIME": calcAvg(a.ACW, a.CALLS),
+    }));
+
+    logger.info(`📊 Agents prepared: ${final.length}`);
+
+    // -----------------------------
+    // 📧 SEND AGENT MAILS
+    // -----------------------------
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const agent of final) {
+      try {
+        await sendEmail(
+          agent.AGENT,
+          `Hourly Activity Report - ${getLADateString()}`,
+          generateEmail(agent, getLADateString()),
+          logger
+        );
+        successCount++;
+      } catch (err) {
+        failCount++;
+        logger.error(`❌ MAIL FAIL | ${agent.AGENT} | ${formatEmailError(err)}`);
+      } finally {
+        await delay(EMAIL_DELAY_MS);
+      }
+    }
+
+    logger.info(
+      `📨 MAIL SUMMARY | Success=${successCount} | Failed=${failCount}`
+    );
+
+    // ✅ Increment sheet count ONLY if mails actually went out
+    if (successCount > 0) {
+      incrementTodaySheetCount();
+    }
+
+    setLastProcessedFile(downloadedFilePath);
+
+    if (successCount > 0) {
+      // deleteDownloadedFile(downloadedFilePath, logger);
+    }
+
+    logger.info("🎉 RUN COMPLETED SUCCESSFULLY");
+
+    if (successCount !== final.length) {
+      logger.warn("⚠ Not all agent mails sent. END mail skipped.");
+    }
+    if (
+      final.length > 0 &&
+      successCount === final.length &&
+      !isScriptEndedToday()
+    ) {
+      try {
+        const sheets = getTodaySheetCount();
+
+        await delay(EMAIL_DELAY_MS);
+        await sendEmail(
+          ["jordan@aorborc.com", "vijay@aorborc.com"],
+          `🛑 Daily Agent Script Ended - ${getLADateString()}`,
+          `
           <p>Hello Team,</p>
           <p>The daily agent report script has <b>ENDED</b>.</p>
           <p><b>Date:</b> ${getLADateString()}</p>
@@ -542,21 +559,22 @@ try {
           <p><b>End Time:</b> ${getLADate().toLocaleString()}</p>
           <br>
           <p>— System</p>
-        `
-      );
+        `,
+          logger
+        );
 
-      logger.info("🛑 END MAIL SENT");
-      markScriptEndedToday();
-      resetTodaySheetCount();
-    } catch (err) {
-      logger.error(`❌ END MAIL FAILED | ${err.message}`);
+        logger.info("🛑 END MAIL SENT");
+        markScriptEndedToday();
+        resetTodaySheetCount();
+      } catch (err) {
+        logger.error(`❌ END MAIL FAILED | ${formatEmailError(err)}`);
+      }
     }
-  }
 
-} catch (err) {
-  logger.error(`🔥 UNHANDLED ERROR | ${err.message}`);
-} finally {
-  releaseLock();
-}
+  } catch (err) {
+    logger.error(`🔥 UNHANDLED ERROR | ${err.message}`);
+  } finally {
+    releaseLock();
+  }
 }
 mergeAndMail();

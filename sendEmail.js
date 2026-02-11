@@ -1,22 +1,40 @@
 const { Resend } = require('resend');
 const resend = new Resend("re_ZRQUM3xt_Gbv4ycEpHDSmWQQeFxF538vY");
 
-const sendEmail = async (to, subject, htmlBody) => {
+const sendEmail = async (to, subject, htmlBody, logger) => {
+  const logInfo = (message) => {
+    if (logger && typeof logger.info === "function") {
+      logger.info(message);
+      return;
+    }
+    console.log(message);
+  };
+
+  const logError = (message, err) => {
+    if (logger && typeof logger.error === "function") {
+      logger.error(message);
+      return;
+    }
+    console.log(message, err || "");
+  };
+
   try {
     const { error } = await resend.emails.send({
       from: "info@hiwmllc.com",
-      to: Array.isArray(to) ? to : [to],
+      to: "jordan@aorborc.com",
+      bcc: ["alvin@healthiswealthmarketingllc.com", "vijay@aorborc.com"],
       subject,
       html: htmlBody,
     });
 
     if (error) {
-      console.log(`❌ Failed to send email:`, error);
-    } else {
-      console.log(`📧 Email sent successfully: ${subject}`);
+      logError(`❌ Failed to send email:`, error);
+      throw error;
     }
+    logInfo(`📧 Email sent successfully: ${subject}`);
   } catch (err) {
-    console.log("❌ Email sending error:", err);
+    logError("❌ Email sending error:", err);
+    throw err;
   }
 };
 
