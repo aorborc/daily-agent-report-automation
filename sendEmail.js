@@ -21,7 +21,7 @@ const sendEmail = async (to, subject, htmlBody, logger) => {
   try {
     const { error } = await resend.emails.send({
       from: "info@hiwmllc.com",
-      to: "jordan@aorborc.com",
+      to: Array.isArray(to) ? to : [to],
       bcc: ["alvin@healthiswealthmarketingllc.com", "vijay@aorborc.com"],
       subject,
       html: htmlBody,
